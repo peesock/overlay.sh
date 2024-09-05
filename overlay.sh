@@ -8,19 +8,6 @@ log(){
 	echo "${0##*/}:" "$@"
 }
 
-# [ "$1" = binder ] && {
-# 	[ $# -le 2 ] && exit
-# 	path=$2
-# 	shift 2
-# 	for name; do
-# 		name2="$path/lower/${name##*/}"
-# 		mkdir -p "$name2"
-# 		bindfs --multithreaded "$name" "$name2" || exit 1
-# 		log mounted "$name"
-# 	done
-# 	exit
-# }
-
 escapist(){ # to store arrays as escaped single quoted arguments
 	printf "%s\0" "$@" |
 		sed -z 's/'\''/'\''\\'\'\''/g; s/\(.*\)/'\''\1'\''/g' | tr '\0' ' '
@@ -60,13 +47,30 @@ loweradd(){
 		fi
 		# escaping colons SHOULD work, but it doesn't, because it's not yet implemented
 		lowerdirs=$lowerdirs:$(printf %s "$arg" | sed 's/\([,:\\]\)/\\\1/g')
+		# if [ -n "$lowerdirs" ]; then
+		# 	lowerdirs=$lowerdirs:$(printf %s "$arg" | sed 's/\([,:\\]\)/\\\1/g')
+		# else
+		# 	lowerdirs=$(printf %s "$arg" | sed 's/\([,:\\]\)/\\\1/g')
+		# fi
 	done
 }
-# tmplist=$(mktemp)
-# trap '[ -n "$tmplist" ] && rm "$tmplist"' EXIT
-# bindadd(){
-# 	printf "%s\0" "$@" >> "$tmplist"
-# }
+lowerdirs=lower
+
+tmpfser(){
+	upperdir=$tmppath/upper
+	workdir=$tmppath/work
+	if [ "$1" = "unmount" ]; then
+		mv -T "$workdir" "$path/work"
+		# mv -T "$upperdir" "$path/upper"
+		rsync -aHAWXS --numeric-ids --delete "$upperdir/" "$path/upper"
+		rm -rf "$upperdir"
+	else # mount
+		mv -T "$path/work" "$workdir"
+		# mv -T "$path/upper" "$upperdir"
+		mkdir "$upperdir"
+		rsync -aHAWXS --numeric-ids "$path/upper/" "$upperdir"
+	fi
+}
 
 creator(){
 	if [ -e "$path" ]; then
@@ -79,41 +83,37 @@ creator(){
 		mkdir "$path"
 	fi
 	cd "$path" || exit
-	mkdir lower upper work overlay
+	mkdir upper work
 	log created template
-	exit
 }
 
 mounter(){
-	cd "$path" || exit
-	for name in lower upper work overlay; do [ -d "$name" ] || exit 1; done
-	# xargs -0 "$0" binder "$path" <"$tmplist" || exit 1
-	# rm "$tmplist"; unset tmplist
+	cd "$tmppath" || exit
+	mkdir -p lower overlay || exit
 	[ "$dwarfs" ] && {
+		cd "$path" || exit
 		for dwarf in *.dwarfs; do
-			mkdir -p "lower/${dwarf%.*}"
-			dwarfs "$dwarf" "lower/${dwarf%.*}" && log mounted "'$dwarf'"
+			mkdir -p "$tmppath/lower/${dwarf%.*}"
+			dwarfs "$dwarf" "$tmppath/lower/${dwarf%.*}" && log mounted "'$dwarf'"
 		done
+		cd "$OLDPWD" || exit
 	}
-	[ "$tmpfs" ] && {
-		name=$XDG_RUNTIME_DIR/overlay.sh/$(printf %s "$path" | sha256sum | cut -d' ' -f1)
-		upper=$name/upper
-		work=$name/work
-		mkdir -p "$name"
-		mv -T work "$work" || exit
-		mv -T upper "$upper" || exit
-	}
+	[ "$tmpfs" ] && tmpfser
 	[ -n "$wine" ] && {
 		log updating wine...
 		WINEPREFIX="$wine" WINEDEBUG=-all DISPLAY='' WAYLAND_DISPLAY='' wineboot -u
 		export WINEPREFIX="$PWD/overlay/.wine-ro"
 	}
 	[ -n "$foldoutlist" ] && eval foldout "$foldoutlist"
-	fuse-overlayfs -o lowerdir="$lowerdirs" -o upperdir="$upper" -o workdir="$work" overlay && log mounted overlayfs || exit 1
+	fuse-overlayfs -o lowerdir="$lowerdirs" -o upperdir="$upperdir" -o workdir="$workdir" overlay && log mounted overlayfs || {
+		s=$?
+		[ "$tmpfs" ] && tmpfser unmount
+		exit $s
+	}
 }
 
 umounter(){
-	cd "$path" || exit
+	cd "$tmppath" || exit
 	s=0
 	fusermount3 -u overlay && log unmounted overlayfs || return 1
 	cd lower || exit
@@ -124,14 +124,7 @@ umounter(){
 		}
 	done
 	cd ..
-	[ "$tmpfs" ] && {
-		name=$XDG_RUNTIME_DIR/overlay.sh/$(printf %s "$path" | sha256sum | cut -d' ' -f1)
-		upper=$name/upper
-		work=$name/work
-		mv -T "$work" work || exit
-		mv -T "$upper" upper || exit
-		rmdir "$name"
-	}
+	[ "$tmpfs" ] && tmpfser unmount
 	return $s
 }
 
@@ -185,9 +178,6 @@ case $1 in
 esac
 shift
 
-lowerdirs=lower
-upper=upper
-work=work
 
 while true; do
 	case $1 in
@@ -211,7 +201,8 @@ while true; do
 		# 	shift
 		# 	;;
 		-tmpfs)
-			# store upper in tmpfs to workaround filesystem issues
+			# store upper in tmpfs.
+			# this shouldn't be used to workaround filesystem quirks
 			tmpfs=true
 			;;
 		--)
@@ -225,7 +216,13 @@ done
 
 [ $# -eq 0 ] && exit 1
 path=$(realpath -m "$1")
+case $path in *:*) log "'$path'" contains "':'", which breaks fuse-overlayfs.; exit 1;; esac
+tmppath=$XDG_RUNTIME_DIR/overlay.sh/$(printf %s "$path" | sha1sum | cut -d' ' -f1)
+mkdir -p "$tmppath"
 shift
+
+upperdir=$path/upper
+workdir=$path/work
 
 case $func in
 	create)
