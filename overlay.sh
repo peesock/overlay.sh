@@ -2,7 +2,7 @@
 set -x
 # rules:
 # images in use should be in the root directory
-# lower either is a mointpoint, or stores multiple mountpoints
+# lower stores multiple mountpoints
 
 log(){
 	echo "${0##*/}:" "$@"
@@ -71,7 +71,10 @@ loweradd(){
 creator(){
 	if [ -e "$path" ]; then
 		log "'$path'" exists, moving into folder of same name
-		foldout "$path"
+		tmp=$(mktemp -up "${path%/*}")
+		mv "$path" "$tmp"
+		mkdir "$path"
+		mv "$tmp" "$path/${path##*/}"
 	else
 		mkdir "$path"
 	fi
