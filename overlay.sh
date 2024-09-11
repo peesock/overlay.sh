@@ -56,7 +56,6 @@ loweradd(){
 		lowerdirs=$lowerdirs:$(printf %s "$arg" | sed 's/\([,:\\]\)/\\\1/g')
 	done
 }
-lowerdirs=lower
 
 creator(){
 	if [ -e "$path" ]; then
@@ -66,24 +65,25 @@ creator(){
 		mkdir "$path"
 	fi
 	cd "$path" || exit
-	mkdir lower upper work
+	mkdir upper work
 	log created template
 }
 
 mounter(){
 	cd "$path" || exit
-	for d in lower upper work; do [ -d "$d" ] || exit; done
-	mkdir -p "$overlaydir"
+	for d in upper work; do [ -d "$d" ] || exit; done
+	mkdir -p "$overlaydir" "$mountdir"
 	[ -n "$foldoutlist" ] && eval foldout "$foldoutlist"
 	fuse-overlayfs -o lowerdir="$lowerdirs" -o upperdir=upper -o workdir=work "$overlaydir" && log mounted overlayfs || exit
 	ln -sfnT "$overlaydir" "$path"/overlay
+	ln -sfnT "$mountdir" "$path"/mount
 }
 
 umounter(){
 	cd "$path" || exit
 	s=0
 	fusermount3 -u "$overlaydir" && log unmounted overlayfs || return 1
-	cd lower || exit
+	cd "$mountdir" || exit
 	for name in * .*; do
 		case $name in .|..) continue;; esac
 		mountpoint -q "$name" && {
@@ -173,11 +173,14 @@ done
 [ $# -eq 0 ] && exit 1
 path=$(realpath -m "$1")
 overlaydir=$XDG_RUNTIME_DIR/overlay.sh/$(printf %s "$path" | sha1sum | cut -d' ' -f1)
+mountdir=$overlaydir/mount
+overlaydir=$overlaydir/overlay
+lowerdirs="$mountdir"
 shift
 
 [ "$automount" ] && {
 	for p in "$path"/*; do
-		case $p in */upper|*/work|*/overlay|*/lower) continue;; esac
+		case $p in */upper|*/work|*/overlay) continue;; esac
 		loweradd "$p"
 	done
 }
@@ -185,8 +188,8 @@ shift
 [ "$dwarfs" ] && (
 	cd "$path" || exit
 	for dwarf in *.dwarfs; do
-		mkdir -p "lower/${dwarf%.*}"
-		dwarfs "$dwarf" "lower/${dwarf%.*}" && log mounted "'$dwarf'"
+		mkdir -p "$mountdir/${dwarf%.*}"
+		dwarfs "$dwarf" "$mountdir/${dwarf%.*}" && log mounted "'$dwarf'"
 	done
 )
 
