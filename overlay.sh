@@ -7,15 +7,40 @@ else
 	exec unshare -cm --keep-caps -- "$0" 1 "$@"
 fi
 
+programName=${0##*/}
+
 log(){
-	printf '%s\n' "${0##*/}: $*"
+	printf '%s\n' "$programName: $*"
+}
+
+escapist(){ # to store arrays as escaped single quoted arguments
+	if [ $# -eq 0 ]; then cat; else printf "%s\0" "$@"; fi |
+		sed -z 's/'\''/'\''\\'\'\''/g; s/\(.*\)/'\''\1'\''/g' | tr '\0' ' '
+}
+
+bind(){
+	s=0
+	while [ $# -gt 0 ]; do
+		mkdir -p "$mountdir/$2"
+		mount --rbind "$1" "$mountdir/$2" &&
+			mount --make-rslave "$mountdir/$2" || s=1
+		shift 2
+	done
+	return $s
 }
 
 bindadd(){
 	for arg; do
-		mkdir "$mountdir/${arg##*/}"
-		mount --bind "$arg" "$mountdir/${arg##*/}"
+		bind "$arg" "${arg##*/}"
 	done
+	return $s
+}
+
+bindroot(){
+	for arg; do
+		bind "$arg" "$arg"
+	done
+	return $s
 }
 
 foldout(){ # /path/to/dir -> /path/to/dir/dir
@@ -29,13 +54,13 @@ foldout(){ # /path/to/dir -> /path/to/dir/dir
 }
 
 creator(){
-	if [ -e "$path" ]; then
-		log "'$path'" exists, moving into folder of same name
-		foldout "$path"
+	if [ -e "$1" ]; then
+		log "'$1'" exists, moving into folder of same name
+		foldout "$1"
 	else
-		mkdir "$path"
+		mkdir "$1"
 	fi
-	cd "$path" || exit
+	cd "$1" || exit
 	mkdir upper work
 	log created template
 }
@@ -43,89 +68,50 @@ creator(){
 mounter(){
 	cd "$path" || exit
 	for d in upper work; do [ -d "$d" ] || exit; done
-	mkdir -p "$mountdir" "$overlaydir"
 	# mount -t overlay overlay -o lowerdir="$mountdir",upperdir=upper,workdir=work,userxattr "$overlaydir" && log mounted overlayfs || exit
-	fuse-overlayfs -o lowerdir="$mountdir",upperdir=upper,workdir=work "$overlaydir" && log mounted overlayfs || exit
+	fuse-overlayfs -o lowerdir="$mountdir",upperdir=upper,workdir=work "$overlaydir" && log mounted fuse-overlayfs || exit
 	ln -sfnT "$overlaydir" "$path"/overlay
 	ln -sfnT "$mountdir" "$path"/mount
 }
 
 umounter(){
 	cd "$path" || exit
-	mountpoint -q "$overlaydir" && {
-		umount "$overlaydir" && log unmounted overlayfs || return 1
-	}
-	s=0
-	cd "$mountdir" || exit
-	[ "$(find . -maxdepth 1 | wc -c)" -gt 2 ] &&
-		for name in * .*; do
-			case $name in .|..) continue;; esac
-			if mountpoint -q "$name"; then
-				umount "$name" && { log unmounted "'$name'"; rmdir "$name"; } || s=1
-			else
-				rmdir "$name"
-			fi
-		done
-	cd "$OLDPWD" || exit
-	return $s
-}
-
-supumounter(){
-	i=0
-	until umounter; do
-		log waiting...
+	until umount "$overlaydir" && log unmounted overlayfs; do
+		mountpoint -q "$overlaydir" || break
+		fuser -v "$overlaydir"
 		sleep 1
-		# [ $i -ge 5 ] && {
-		# 	log killing...
-		# 	fuser -Mikv "$mount" || break
-		# }
-		i=$((i + 1))
 	done
+	umount -l "$mountdir"
 }
 
-executor(){
+runner(){
 	mounter
 	cd "$path/overlay" || exit
 	if [ $# -ge 1 ]; then
-		unshare -c "$@"
+		"$@"
 	elif [ -t 1 ]; then
 		log entering shell...
-		unshare -c "$SHELL"
+		"$SHELL"
 		log returning...
 	else
 		log provide a command.
 		exit 1
 	fi
-	supumounter
+	umounter
 }
 
-case $1 in
-	c*)
-		func=create;;
-	# m*)
-	# 	func=mount;;
-	u*)
-		func=umount;;
-	e*)
-		func=execute;;
-	*)
-		log "'$1'" not a function
-		exit 1;;
-esac
-shift
-
-
-[ $# -eq 0 ] && exit 1
-path=$(realpath -m "$1")
-overlaydir=$XDG_RUNTIME_DIR/overlay.sh/$(printf %s "$path" | sha1sum | cut -d' ' -f1)
-mountdir=$overlaydir/mount
-overlaydir=$overlaydir/overlay
-shift
+commadd(){
+	commstring=$commstring"$(escapist "$@");"
+}
 
 while true; do
 	case $1 in
 		-automount) # get all paths in root and mount to lower
 			automount=true
+			;;
+		-c*)
+			creator "$(realpath -m "$2")"
+			exit
 			;;
 		-dedupe) # compare lowerdirs with corresponding overlay dirs and remove dupes
 			dedupe=true
@@ -133,9 +119,16 @@ while true; do
 		-dwarfs) # find *.dwarfs files and mount to lower
 			dwarfs=true
 			;;
+		-bind)
+			commadd bind "$2" "$3"
+			shift 2
+			;;
 		-bindadd)
-			l=$(realpath -e "$2") || exit
-			bindadd "$l"
+			commadd bindadd "$(realpath -e "$2")" || exit
+			shift
+			;;
+		-bindroot)
+			commadd bindroot "$(realpath -e "$2")" || exit
 			shift
 			;;
 		-wine) # update wine and mount to lower
@@ -149,6 +142,22 @@ while true; do
 	esac
 	shift
 done
+
+if [ $# -ge 1 ]; then
+	path=$(realpath -e "$1")
+	[ -z "$path" ] && exit 1
+	shift
+else
+	path=$(realpath .)
+fi
+overlaydir="$XDG_RUNTIME_DIR/$programName/$(printf %s "$path" | sha1sum | cut -d' ' -f1)"
+mountdir=$overlaydir/mount
+overlaydir=$overlaydir/overlay
+mkdir -p "$overlaydir" "$mountdir"
+mount -t tmpfs tmpfs "$mountdir"
+mount --make-rslave "$mountdir"
+
+eval "$commstring"
 
 [ "$automount" ] && {
 	for p in "$path"/*; do
@@ -174,13 +183,4 @@ done
 	bindadd "$wine"
 }
 
-case $func in
-	create)
-		creator;;
-	mount)
-		mounter;;
-	umount)
-		umounter;;
-	execute)
-		executor "$@";;
-esac
+runner "$@"
