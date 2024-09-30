@@ -1,6 +1,5 @@
 #!/bin/sh
 # set -x
-
 if [ "$1" = 1 ]; then
 	shift
 else
@@ -13,34 +12,35 @@ log(){
 	printf '%s\n' "$programName: $*"
 }
 
-escapist(){ # to store arrays as escaped single quoted arguments
-	if [ $# -eq 0 ]; then cat; else printf "%s\0" "$@"; fi |
-		sed -z 's/'\''/'\''\\'\'\''/g; s/\(.*\)/'\''\1'\''/g' | tr '\0' ' '
-}
-
 bind(){
 	s=0
+	root=$1
+	shift
 	while [ $# -gt 0 ]; do
-		mkdir -p "$mountdir/$2"
-		mount --rbind "$1" "$mountdir/$2" &&
-			mount --make-rslave "$mountdir/$2" || s=1
+		if [ -d "$1" ]; then
+			mkdir -p "$root/$2"
+			echo mkdir -p "$root/$2"
+		else
+			[ "${2%/*}" != "$2" ] && mkdir -p "$root/${2%/*}"
+			touch "$root/$2"
+		fi
+		mount --rbind "$1" "$root/$2" &&
+			mount --make-rslave "$root/$2" || s=1
 		shift 2
 	done
 	return $s
 }
 
-bindadd(){
-	for arg; do
-		bind "$arg" "${arg##*/}"
-	done
-	return $s
-}
-
-bindroot(){
-	for arg; do
-		bind "$arg" "$arg"
-	done
-	return $s
+binder(){
+	root=$2
+	arg=$(realpath -e -- "$3")
+	case $1 in
+		add)
+			arg2=${arg##*/} ;;
+		root)
+			arg2=$arg ;;
+	esac
+	bind "$root" "$arg" "$arg2"
 }
 
 foldout(){ # /path/to/dir -> /path/to/dir/dir
@@ -61,55 +61,31 @@ creator(){
 		mkdir "$1"
 	fi
 	cd "$1" || exit
-	mkdir upper work
+	mkdir mount upper work overlay
 	log created template
 }
 
-mounter(){
-	cd "$path" || exit
-	for d in upper work; do [ -d "$d" ] || exit; done
-	# mount -t overlay overlay -o lowerdir="$mountdir",upperdir=upper,workdir=work,userxattr "$overlaydir" && log mounted overlayfs || exit
-	fuse-overlayfs -o lowerdir="$mountdir",upperdir=upper,workdir=work "$overlaydir" && log mounted fuse-overlayfs || exit
-	ln -sfnT "$overlaydir" "$path"/overlay
-	ln -sfnT "$mountdir" "$path"/mount
-}
-
-umounter(){
-	cd "$path" || exit
-	until umount "$overlaydir" && log unmounted overlayfs; do
-		mountpoint -q "$overlaydir" || break
-		fuser -v "$overlaydir"
-		sleep 1
-	done
-	umount -l "$mountdir"
-}
-
-runner(){
-	mounter
-	cd "$path/overlay" || exit
-	if [ $# -ge 1 ]; then
-		"$@"
-	elif [ -t 1 ]; then
-		log entering shell...
-		"$SHELL"
-		log returning...
-	else
-		log provide a command.
-		exit 1
-	fi
-	umounter
+escapist(){ # to store arrays as escaped single quoted arguments
+	if [ $# -eq 0 ]; then cat; else printf "%s\0" "$@"; fi |
+		sed -z 's/'\''/'\''\\'\'\''/g; s/\(.*\)/'\''\1'\''/g' | tr '\0' ' '
 }
 
 commadd(){
-	commstring=$commstring"$(escapist "$@");"
+	v=$1
+	shift
+	eval "$v=\$$v"'"$(escapist "$@");"'
 }
 
+mount=mount
+upper=upper
+work=work
+overlay=overlay
 while true; do
 	case $1 in
 		-automount) # get all paths in root and mount to lower
 			automount=true
 			;;
-		-c*)
+		-c|-create)
 			creator "$(realpath -m "$2")"
 			exit
 			;;
@@ -119,16 +95,13 @@ while true; do
 		-dwarfs) # find *.dwarfs files and mount to lower
 			dwarfs=true
 			;;
-		-bind)
-			commadd bind "$2" "$3"
-			shift 2
-			;;
-		-bindadd)
-			commadd bindadd "$(realpath -e "$2")" || exit
-			shift
-			;;
-		-bindroot)
-			commadd bindroot "$(realpath -e "$2")" || exit
+		-bind*|-mnt*)
+			[ "${1#'-bind'}" != "$1" ] && root=$overlay func=postmount || root=$mount func=premount
+			case $1 in
+				*add) commadd $func binder add "$root" "$2";;
+				*root) commadd $func binder root "$root" "$2";;
+				*) commadd $func bind "$root" "$2"; shift;;
+			esac
 			shift
 			;;
 		-wine) # update wine and mount to lower
@@ -144,25 +117,23 @@ while true; do
 done
 
 if [ $# -ge 1 ]; then
-	path=$(realpath -e "$1")
+	path=$(realpath -e -- "$1")
 	[ -z "$path" ] && exit 1
 	shift
 else
 	path=$(realpath .)
 fi
-overlaydir="$XDG_RUNTIME_DIR/$programName/$(printf %s "$path" | sha1sum | cut -d' ' -f1)"
-mountdir=$overlaydir/mount
-overlaydir=$overlaydir/overlay
-mkdir -p "$overlaydir" "$mountdir"
-mount -t tmpfs tmpfs "$mountdir"
-mount --make-rslave "$mountdir"
+cd "$path" || exit
+for d in "$mount" "$upper" "$work" "$overlay"; do [ -d "$d" ] || exit; done
+mount -t tmpfs tmpfs "$mount"
+mount --make-rslave "$mount"
 
-eval "$commstring"
+eval "$premount"
 
 [ "$automount" ] && {
 	for p in "$path"/*; do
 		case $p in */upper|*/work|*/mount|*/overlay) continue;; esac
-		bindadd "$p"
+		binder add "$mount" "$p"
 	done
 }
 
@@ -170,8 +141,8 @@ eval "$commstring"
 	cd "$path" || exit
 	[ "$(find . -maxdepth 1 -type f -name \*.dwarfs | wc -l)" -eq 0 ] && return
 	for dwarf in *.dwarfs; do
-		mkdir -p "$mountdir/${dwarf%.*}"
-		dwarfs "$dwarf" "$mountdir/${dwarf%.*}" && log mounted "'$dwarf'"
+		mkdir -p "$path/mount/${dwarf%.*}"
+		dwarfs "$dwarf" "$path/mount/${dwarf%.*}" && log mounted "'$dwarf'"
 	done
 )
 
@@ -179,8 +150,45 @@ eval "$commstring"
 	[ -d ~/.wine-ro ] && wine=$HOME/.wine-ro || wine=${WINEPREFIX-"$HOME"/.wine}
 	log updating wine...
 	WINEPREFIX="$wine" WINEDEBUG=-all DISPLAY='' WAYLAND_DISPLAY='' wineboot -u
-	export WINEPREFIX="$overlaydir/.wine-ro"
-	bindadd "$wine"
+	export WINEPREFIX="$path/overlay/.wine-ro"
+	binder add "$mount" "$wine"
 }
 
-runner "$@"
+# mount -t overlay overlay -o lowerdir="$mount",upperdir=upper,workdir=work,userxattr "$overlay" && log mounted overlayfs || exit
+fuse-overlayfs -o "lowerdir=$mount,upperdir=$upper,workdir=$work" "$overlay" && log mounted fuse-overlayfs || exit
+
+eval "$postmount"
+
+cd overlay || exit
+if [ $# -ge 1 ]; then
+	"$@"
+elif [ -t 1 ]; then
+	log entering shell...
+	"$SHELL"
+	log returning...
+else
+	log provide a command.
+	exit 1
+fi
+
+cd "$path" || exit
+until err=$(umount "$overlay" 2>&1) && log unmounted overlayfs; do
+	pidlist=$(fuser -Mm "$overlay" 2>/dev/null) || {
+		mountpoint -q "$overlay" || break
+		umount -l "$overlay"
+		log lazily unmounted overlayfs
+		break
+	}
+	if [ "$pidlist" != "$prevlist" ]; then
+		echo "$err"
+		ps -p "$(echo "$pidlist" | sed 's/\s\+/,/g; s/^,\+//')"
+		change=1
+	elif [ "$change" -eq 1 ]; then
+		log waiting...
+		change=0
+	fi
+	prevlist=$pidlist
+
+	sleep 1
+done
+umount -l "$mount"
