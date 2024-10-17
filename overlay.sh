@@ -1,4 +1,8 @@
 #!/bin/sh
+# notes:
+# 	socket files don't work until all prior connections are terminated
+# 	moving files from lowerdir will *copy* them, using disk space
+
 # set -x
 if [ "$1" = 1 ]; then
 	shift
@@ -12,20 +16,28 @@ log(){
 	printf '%s\n' "$programName: $*"
 }
 
+mount(){
+	command mount -v "$@" && {
+		eval last=\$$#
+		printf '%s\0' "$last" >>"$mountlog"
+	}
+}
+
 bind(){
 	s=0
-	root=$1
+	root="$path/$1"
 	shift
 	while [ $# -gt 0 ]; do
+		dirin=$1
+		dirout=${2#/}
 		if [ -d "$1" ]; then
-			mkdir -p "$root/$2"
-			echo mkdir -p "$root/$2"
+			mkdir -p "$root/$dirout"
 		else
-			[ "${2%/*}" != "$2" ] && mkdir -p "$root/${2%/*}"
-			touch "$root/$2"
+			[ "${dirout%/*}" != "$dirout" ] && mkdir -p "$root/${dirout%/*}"
+			touch "$root/$dirout"
 		fi
-		mount --rbind "$1" "$root/$2" &&
-			mount --make-rslave "$root/$2" || s=1
+		mount -o rbind,ro=recursive -- "$dirin" "$root/$dirout" &&
+			command mount --make-rslave -- "$root/$dirout" || s=1
 		shift 2
 	done
 	return $s
@@ -61,7 +73,7 @@ creator(){
 		mkdir "$1"
 	fi
 	cd "$1" || exit
-	mkdir mount upper work overlay
+	mkdir "$mount" "$upper" "$work" "$overlay"
 	log created template
 }
 
@@ -74,6 +86,10 @@ commadd(){
 	v=$1
 	shift
 	eval "$v=\$$v"'"$(escapist "$@");"'
+}
+
+tmpfs(){
+	mount -t tmpfs tmpfs -- "$path/$mount/$1"
 }
 
 mount=mount
@@ -96,12 +112,16 @@ while true; do
 			dwarfs=true
 			;;
 		-bind*|-mnt*)
-			[ "${1#'-bind'}" != "$1" ] && root=$overlay func=postmount || root=$mount func=premount
+			[ "${1#'-bind'}" != "$1" ] && root=$overlay var=postmount || root=$mount var=premount
 			case $1 in
-				*add) commadd $func binder add "$root" "$2";;
-				*root) commadd $func binder root "$root" "$2";;
-				*) commadd $func bind "$root" "$2"; shift;;
+				*add) commadd $var binder add "$root" "$2";;
+				*root) commadd $var binder root "$root" "$2";;
+				*) commadd $var bind "$root" "$2" "$3"; shift;;
 			esac
+			shift
+			;;
+		-tmpfs)
+			commadd premount tmpfs "$2"
 			shift
 			;;
 		-wine) # update wine and mount to lower
@@ -125,41 +145,50 @@ else
 fi
 cd "$path" || exit
 for d in "$mount" "$upper" "$work" "$overlay"; do [ -d "$d" ] || exit; done
+mountlog=$path/mountlog
+trap 'rm "$mountlog"' EXIT
 mount -t tmpfs tmpfs "$mount"
-mount --make-rslave "$mount"
+command mount --make-rslave "$mount"
 
 eval "$premount"
 
 [ "$automount" ] && {
-	for p in "$path"/*; do
-		case $p in */upper|*/work|*/mount|*/overlay) continue;; esac
+	for p in * .[!.]* ..[!$]*; do
+	[ ! -e "$p" ] || [ "$p" = "$mount" ] || [ "$p" = "$upper" ] || [ "$p" = "$work" ] || [ "$p" = "$overlay" ] || [ "$p" = "$mountlog" ] && continue
 		binder add "$mount" "$p"
 	done
 }
 
 [ "$dwarfs" ] && (
 	cd "$path" || exit
-	[ "$(find . -maxdepth 1 -type f -name \*.dwarfs | wc -l)" -eq 0 ] && return
-	for dwarf in *.dwarfs; do
+	for dwarf in *.dwarfs .*.dwarfs; do
+		[ -f "$dwarf" ] || continue
 		mkdir -p "$path/mount/${dwarf%.*}"
-		dwarfs "$dwarf" "$path/mount/${dwarf%.*}" && log mounted "'$dwarf'"
+		dwarfs "$dwarf" "$path/mount/${dwarf%.*}" && log mounted "$dwarf"
 	done
 )
 
 [ "$wine" ] && {
 	[ -d ~/.wine-ro ] && wine=$HOME/.wine-ro || wine=${WINEPREFIX-"$HOME"/.wine}
 	log updating wine...
-	WINEPREFIX="$wine" WINEDEBUG=-all DISPLAY='' WAYLAND_DISPLAY='' wineboot -u
-	export WINEPREFIX="$path/overlay/.wine-ro"
+	export WINEPREFIX="$wine"
+	WINEDEBUG=-all DISPLAY='' WAYLAND_DISPLAY='' wineboot -u
 	binder add "$mount" "$wine"
 }
 
 # mount -t overlay overlay -o lowerdir="$mount",upperdir=upper,workdir=work,userxattr "$overlay" && log mounted overlayfs || exit
-fuse-overlayfs -o "lowerdir=$mount,upperdir=$upper,workdir=$work" "$overlay" && log mounted fuse-overlayfs || exit
+fuse-overlayfs \
+	-o "lowerdir=$mount,upperdir=$upper,workdir=$work" \
+	-o "squash_to_uid=$(id -ru),squash_to_gid=$(id -rg)" \
+	"$overlay" && log mounted fuse-overlayfs || exit
 
 eval "$postmount"
 
-cd overlay || exit
+[ "$wine" ] && {
+	mount --bind "$overlay/${wine##*/}" "$wine"
+}
+
+cd "$overlay" || exit
 if [ $# -ge 1 ]; then
 	"$@"
 elif [ -t 1 ]; then
@@ -170,8 +199,17 @@ else
 	log provide a command.
 	exit 1
 fi
+log exiting...
 
 cd "$path" || exit
+{
+	n=$(tr -cd '\0' <"$mountlog" | wc -c)
+	[ "$n" ] || return
+	for i in $(seq 1 $n | tac); do
+		line=$(sed -zn "$i"p <"$mountlog")
+		umount -vr -- "$line"
+	done
+}
 until err=$(umount "$overlay" 2>&1) && log unmounted overlayfs; do
 	pidlist=$(fuser -Mm "$overlay" 2>/dev/null) || {
 		mountpoint -q "$overlay" || break
@@ -181,7 +219,8 @@ until err=$(umount "$overlay" 2>&1) && log unmounted overlayfs; do
 	}
 	if [ "$pidlist" != "$prevlist" ]; then
 		echo "$err"
-		ps -p "$(echo "$pidlist" | sed 's/\s\+/,/g; s/^,\+//')"
+		# ps -p "$(echo "$pidlist" | sed 's/\s\+/,/g; s/^,\+//')"
+		fuser -vmM "$overlay"
 		change=1
 	elif [ "$change" -eq 1 ]; then
 		log waiting...
