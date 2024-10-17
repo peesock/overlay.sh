@@ -55,25 +55,20 @@ binder(){
 	bind "$root" "$arg" "$arg2"
 }
 
-foldout(){ # /path/to/dir -> /path/to/dir/dir
-	for arg; do
-		tmp=$(mktemp -up "${arg%/*}")
-		mv -T "$arg" "$tmp" || return 1
-		mkdir "$arg"
-		mv -T "$tmp" "$arg/${arg##*/}"
-		log moved "'$arg'" to "'$arg/${arg##*/}'"
-	done
-}
-
 creator(){
 	if [ -e "$1" ]; then
 		log "'$1'" exists, moving into folder of same name
-		foldout "$1"
+		tmp=$(mktemp -up "${1%/*}")
+		mv -T "$1" "$tmp" || return 1
+		mkdir "$1"
+		mv -T "$tmp" "$1/$data/${1##*/}"
+		log moved "'$1'" to "'$1/$data/${1##*/}'"
 	else
 		mkdir "$1"
 	fi
 	cd "$1" || exit
-	mkdir "$mount" "$upper" "$work" "$overlay"
+	mkdir "$mount" "$upper" "$work" "$overlay" "$data"
+	touch "$mountlog"
 	log created template
 }
 
@@ -96,6 +91,8 @@ mount=mount
 upper=upper
 work=work
 overlay=overlay
+mountlog=mountlog
+data=data
 while true; do
 	case $1 in
 		-automount) # get all paths in root and mount to lower
@@ -144,23 +141,33 @@ else
 	path=$(realpath .)
 fi
 cd "$path" || exit
-for d in "$mount" "$upper" "$work" "$overlay"; do [ -d "$d" ] || exit; done
-mountlog=$path/mountlog
-trap 'rm "$mountlog"' EXIT
+s=0; for d in "$mount" "$upper" "$work" "$overlay" "$data"; do
+	[ -d "$d" ] || { log "$path/$d isn't a dir"; s=1; }
+done
+[ "$s" -gt 0 ] && {
+	log "$path isn't properly formatted"
+	exit 1
+}
+{ [ "$(wc -c <"$mountlog")" -gt 0 ]; } 2>/dev/null && {
+	log "$path/$mountlog" is not empty, indicating bad unmounting
+	exit 1
+}
+trap 'printf "" > "$mountlog"' EXIT
 mount -t tmpfs tmpfs "$mount"
 command mount --make-rslave "$mount"
 
 eval "$premount"
 
-[ "$automount" ] && {
+[ "$automount" ] && (
+	cd "$data" || exit
 	for p in * .[!.]* ..[!$]*; do
-	[ ! -e "$p" ] || [ "$p" = "$mount" ] || [ "$p" = "$upper" ] || [ "$p" = "$work" ] || [ "$p" = "$overlay" ] || [ "$p" = "$mountlog" ] && continue
+	[ -e "$p" ] || continue
 		binder add "$mount" "$p"
 	done
-}
+)
 
 [ "$dwarfs" ] && (
-	cd "$path" || exit
+	cd "$data" || exit
 	for dwarf in *.dwarfs .*.dwarfs; do
 		[ -f "$dwarf" ] || continue
 		mkdir -p "$path/mount/${dwarf%.*}"
@@ -176,7 +183,6 @@ eval "$premount"
 	binder add "$mount" "$wine"
 }
 
-# mount -t overlay overlay -o lowerdir="$mount",upperdir=upper,workdir=work,userxattr "$overlay" && log mounted overlayfs || exit
 fuse-overlayfs \
 	-o "lowerdir=$mount,upperdir=$upper,workdir=$work" \
 	-o "squash_to_uid=$(id -ru),squash_to_gid=$(id -rg)" \
@@ -199,10 +205,11 @@ else
 	log provide a command.
 	exit 1
 fi
+echo
 log exiting...
 
 cd "$path" || exit
-{
+{ # not foolproof but helps
 	n=$(tr -cd '\0' <"$mountlog" | wc -c)
 	[ "$n" ] || return
 	for i in $(seq 1 $n | tac); do
@@ -213,6 +220,7 @@ cd "$path" || exit
 until err=$(umount "$overlay" 2>&1) && log unmounted overlayfs; do
 	pidlist=$(fuser -Mm "$overlay" 2>/dev/null) || {
 		mountpoint -q "$overlay" || break
+		# if there are no processes but overlay is still mounted, lazy umount
 		umount -l "$overlay"
 		log lazily unmounted overlayfs
 		break
