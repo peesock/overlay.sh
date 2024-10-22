@@ -95,6 +95,9 @@ mountlog=mountlog
 data=data
 while true; do
 	case $1 in
+		-autocd) # cd into either overlaydir or the only available non-hidden mount dir
+			autocd=true
+			;;
 		-automount) # get all paths in root and mount to lower
 			automount=true
 			;;
@@ -194,7 +197,21 @@ eval "$postmount"
 	mount --bind "$overlay/${wine##*/}" "$wine"
 }
 
-cd "$overlay" || exit
+[ "$autocd" ] && {
+	unset dir
+	for p in "$mount"/*; do
+		[ -d "$p" ] && {
+			if [ -z "$dir" ]; then
+				dir=$overlay/${p##*/}
+			else
+				dir=$overlay
+				break
+			fi
+		}
+		done
+	cd "$dir" || exit
+}
+
 if [ $# -ge 1 ]; then
 	"$@"
 elif [ -t 1 ]; then
