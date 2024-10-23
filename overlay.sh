@@ -97,6 +97,10 @@ export XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
 global=$XDG_DATA_HOME/$programName
 while true; do
 	case $1 in
+		-auto)
+			autocd=true
+			automount=true
+			;;
 		-autocd) # cd into either overlaydir or the only available non-hidden mount dir
 			autocd=true
 			;;
@@ -110,8 +114,8 @@ while true; do
 		-dedupe) # compare lowerdirs with corresponding overlay dirs and remove dupes
 			dedupe=true
 			;;
-		-dwarfs) # find *.dwarfs files and mount to lower
-			dwarfs=true
+		-i|-interactive) # prompt before deleting
+			interactive=true
 			;;
 		-bind*|-mnt*)
 			[ "${1#'-bind'}" != "$1" ] && root=$overlay var=postmount || root=$mount/private var=premount
@@ -171,17 +175,13 @@ eval "$premount"
 [ "$automount" ] && (
 	cd "$data" || exit
 	for p in * .[!.]* ..[!$]*; do
-	[ -e "$p" ] || continue
+		[ -e "$p" ] || continue
+		[ "${p%.dwarfs}" != "$p" ] && {
+			mkdir -p "$path/$mount/private/${p%.*}"
+			dwarfs "$p" "$path/$mount/private/${p%.*}" &&
+				log dwarf mounted "$p" && continue
+		}
 		binder add "$mount/private" "$p"
-	done
-)
-
-[ "$dwarfs" ] && (
-	cd "$data" || exit
-	for dwarf in *.dwarfs .*.dwarfs; do
-		[ -f "$dwarf" ] || continue
-		mkdir -p "$path/$mount/private/${dwarf%.*}"
-		dwarfs "$dwarf" "$path/$mount/private/${dwarf%.*}" && log mounted "$dwarf"
 	done
 )
 
@@ -238,18 +238,32 @@ cd "$path" || exit
 
 [ "$dedupe" ] && {
 	# TODO: check for open files before deduping
-	# and also add parallelism
 	tmp=$(mktemp)
 	for p in "$mount"/*/*; do
 		log looking for duplicates in "$upper/${p##*/}"
-		find "$upper/${p##*/}" -type f -print0 | \
-			cut -zb $(($(printf %s "$upper/" | wc -c) + 1))- | \
-			awk -v upper="$upper/" -v mount="${p%/*}/" 'BEGIN{RS="\0"; ORS="\0"} {print upper$0; print mount$0}' | \
-			xargs -0xn2 sh -c 'cmp -s -- "$1" "$2" && printf "%s\0" "$1"' sh | tee "$tmp" | tr '\0' '\n'
+		find "$upper/${p##*/}" -depth -type f -print0 |
+			cut -zb $(($(printf %s "$upper/" | wc -c) + 1))- |
+			awk -v upper="$upper/" -v mount="${p%/*}/" 'BEGIN{RS="\0"; ORS="\0"} {print upper$0; print mount$0}' |
+			unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
+				until [ $# -le 0 ]; do
+					(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
+					shift 2
+				done
+				wait
+				' sh | tee "$tmp" | tr '\0' '\n'
+		# unshare creates a new pid namespace so that pid collisions are impossible
+
 		grep -qz . <"$tmp" && {
-			printf "delete these files? y/N: "
-			read -r line
-			case $line in y|Y) xargs -0 rm -- <"$tmp";; esac
+			[ "$interactive" ] && {
+				printf "delete these files? y/N: "
+				read -r line
+			} || line=y
+			case $line in y|Y)
+				xargs -0 rm -- <"$tmp"
+				xargs -0 dirname -z -- <"$tmp" | uniq -z | xargs -0 rmdir -p --ignore-fail-on-non-empty -- 2>/dev/null
+				log removed duplicates
+				;;
+			esac
 		}
 	done
 	rm "$tmp"
