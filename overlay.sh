@@ -93,6 +93,8 @@ work=work
 overlay=overlay
 mountlog=mountlog
 data=data
+export XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
+global=$XDG_DATA_HOME/$programName
 while true; do
 	case $1 in
 		-autocd) # cd into either overlaydir or the only available non-hidden mount dir
@@ -112,7 +114,7 @@ while true; do
 			dwarfs=true
 			;;
 		-bind*|-mnt*)
-			[ "${1#'-bind'}" != "$1" ] && root=$overlay var=postmount || root=$mount var=premount
+			[ "${1#'-bind'}" != "$1" ] && root=$overlay var=postmount || root=$mount/private var=premount
 			case $1 in
 				*add) commadd $var binder add "$root" "$2";;
 				*root) commadd $var binder root "$root" "$2";;
@@ -125,7 +127,11 @@ while true; do
 			shift
 			;;
 		-wine) # update wine and mount to lower
-			wine=true
+			export WINEPREFIX="$global/$2"
+			export STEAM_COMPAT_DATA_PATH="$WINEPREFIX"
+			mkdir -p "$WINEPREFIX"
+			wine=$(command -v "$3") && test -x "$wine" || wine=$(command -v wine)
+			shift 2
 			;;
 		--)
 			shift
@@ -151,13 +157,14 @@ done
 	log "$path isn't properly formatted"
 	exit 1
 }
-{ [ "$(wc -c <"$mountlog")" -gt 0 ]; } 2>/dev/null && {
+grep -zq . "$mountlog" 2>/dev/null && {
 	log "$path/$mountlog" is not empty, indicating bad unmounting
 	exit 1
 }
-trap 'printf "" > "$mountlog"' EXIT
+trap 'rm "$mountlog"' EXIT
 mount -t tmpfs tmpfs "$mount"
 command mount --make-rslave "$mount"
+mkdir "$mount"/private "$mount"/public
 
 eval "$premount"
 
@@ -165,7 +172,7 @@ eval "$premount"
 	cd "$data" || exit
 	for p in * .[!.]* ..[!$]*; do
 	[ -e "$p" ] || continue
-		binder add "$mount" "$p"
+		binder add "$mount/private" "$p"
 	done
 )
 
@@ -173,33 +180,33 @@ eval "$premount"
 	cd "$data" || exit
 	for dwarf in *.dwarfs .*.dwarfs; do
 		[ -f "$dwarf" ] || continue
-		mkdir -p "$path/mount/${dwarf%.*}"
-		dwarfs "$dwarf" "$path/mount/${dwarf%.*}" && log mounted "$dwarf"
+		mkdir -p "$path/$mount/private/${dwarf%.*}"
+		dwarfs "$dwarf" "$path/$mount/private/${dwarf%.*}" && log mounted "$dwarf"
 	done
 )
 
-[ "$wine" ] && {
-	[ -d ~/.wine-ro ] && wine=$HOME/.wine-ro || wine=${WINEPREFIX-"$HOME"/.wine}
+[ -n "$wine" ] && {
 	log updating wine...
-	export WINEPREFIX="$wine"
-	WINEDEBUG=-all DISPLAY='' WAYLAND_DISPLAY='' wineboot -u
-	binder add "$mount" "$wine"
+	DISPLAY='' WAYLAND_DISPLAY='' "$wine" wineboot
+	binder add "$mount/public" "$WINEPREFIX"
 }
 
 fuse-overlayfs \
-	-o "lowerdir=$mount,upperdir=$upper,workdir=$work" \
+	-o "lowerdir=$mount/public:$mount/private,upperdir=$upper,workdir=$work" \
 	-o "squash_to_uid=$(id -ru),squash_to_gid=$(id -rg)" \
 	"$overlay" && log mounted fuse-overlayfs || exit
 
 eval "$postmount"
 
-[ "$wine" ] && {
-	mount --bind "$overlay/${wine##*/}" "$wine"
+[ -n "$wine" ] && {
+	# this is crazy
+	until [ -z "$(lsof +D "$WINEPREFIX" 2>/dev/null)" ]; do true; done
+	mount --bind "$overlay/${WINEPREFIX##*/}" "$WINEPREFIX"
 }
 
 [ "$autocd" ] && {
 	unset dir
-	for p in "$mount"/*; do
+	for p in "$mount"/private/*; do
 		[ -d "$p" ] && {
 			if [ -z "$dir" ]; then
 				dir=$overlay/${p##*/}
@@ -208,10 +215,11 @@ eval "$postmount"
 				break
 			fi
 		}
-		done
-	cd "$dir" || exit
+	done
+	cd "${dir-"$overlay"}" || exit
 }
 
+trap 'log INT recieved' INT # TODO: signal handling
 if [ $# -ge 1 ]; then
 	"$@"
 elif [ -t 1 ]; then
@@ -224,12 +232,33 @@ else
 fi
 echo
 log exiting...
+trap - INT
 
 cd "$path" || exit
+
+[ "$dedupe" ] && {
+	# TODO: check for open files before deduping
+	# and also add parallelism
+	tmp=$(mktemp)
+	for p in "$mount"/*/*; do
+		log looking for duplicates in "$upper/${p##*/}"
+		find "$upper/${p##*/}" -type f -print0 | \
+			cut -zb $(($(printf %s "$upper/" | wc -c) + 1))- | \
+			awk -v upper="$upper/" -v mount="${p%/*}/" 'BEGIN{RS="\0"; ORS="\0"} {print upper$0; print mount$0}' | \
+			xargs -0xn2 sh -c 'cmp -s -- "$1" "$2" && printf "%s\0" "$1"' sh | tee "$tmp" | tr '\0' '\n'
+		grep -qz . <"$tmp" && {
+			printf "delete these files? y/N: "
+			read -r line
+			case $line in y|Y) xargs -0 rm -- <"$tmp";; esac
+		}
+	done
+	rm "$tmp"
+}
+
 { # not foolproof but helps
 	n=$(tr -cd '\0' <"$mountlog" | wc -c)
 	[ "$n" ] || return
-	for i in $(seq 1 $n | tac); do
+	for i in $(seq 1 "$n" | tac); do
 		line=$(sed -zn "$i"p <"$mountlog")
 		umount -vr -- "$line"
 	done
