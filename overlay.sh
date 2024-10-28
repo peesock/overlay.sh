@@ -3,7 +3,6 @@
 # 	socket files don't work until all prior connections are terminated
 # 	moving files from lowerdir will *copy* them, using disk space
 
-# set -x
 if [ "$1" = 1 ]; then
 	shift
 else
@@ -19,7 +18,7 @@ log(){
 mount(){
 	command mount -v "$@" && {
 		eval last=\$$#
-		printf '%s\0' "$last" >>"$mountlog"
+		printf '%s\0' "$last" >>"$path/$mountlog"
 	}
 }
 
@@ -61,14 +60,13 @@ creator(){
 		tmp=$(mktemp -up "${1%/*}")
 		mv -T "$1" "$tmp" || return 1
 		mkdir "$1"
-		mv -T "$tmp" "$1/$data/${1##*/}"
-		log moved "'$1'" to "'$1/$data/${1##*/}'"
+		mv -T "$tmp" "$1/${1##*/}" &&
+			log moved "'$1'" to "'$1/${1##*/}'"
 	else
 		mkdir "$1"
 	fi
 	cd "$1" || exit
 	mkdir "$mount" "$upper" "$work" "$overlay" "$data"
-	touch "$mountlog"
 	log created template
 }
 
@@ -85,6 +83,19 @@ commadd(){
 
 tmpfs(){
 	mount -t tmpfs tmpfs -- "$path/$mount/$1"
+}
+
+mountplacer(){
+	[ -n "$2" ] && {
+		one=$1
+		shift
+		commadd premount log running "'$*'"...
+		commadd premount "$@"
+		set -- "$one" "$@"
+	}
+	commadd premount binder add "$mount/public" "$1"
+	postmount=$postmount'until [ -z "$(lsof +D '"$(escapist "$1")"' 2>/dev/null)" ]; do true; done;'
+	commadd postmount mount --bind "$overlay/${1##*/}" "$1"
 }
 
 mount=mount
@@ -132,10 +143,15 @@ while true; do
 			;;
 		-wine) # update wine and mount to lower
 			export WINEPREFIX="$global/$2"
-			export STEAM_COMPAT_DATA_PATH="$WINEPREFIX"
 			mkdir -p "$WINEPREFIX"
-			wine=$(command -v "$3") && test -x "$wine" || wine=$(command -v wine)
-			shift 2
+			mountplacer "$WINEPREFIX" wineboot
+			shift
+			;;
+		-proton)
+			export STEAM_COMPAT_DATA_PATH="$global/$2"
+			mkdir -p "$STEAM_COMPAT_DATA_PATH"
+			mountplacer "$STEAM_COMPAT_DATA_PATH" proton wineboot
+			shift
 			;;
 		--)
 			shift
@@ -154,7 +170,7 @@ else
 	path=$(realpath .)
 fi
 cd "$path" || exit
-s=0; for d in "$mount" "$upper" "$work" "$overlay" "$data"; do
+s=0; for d in "$mount" "$upper" "$work" "$overlay"; do
 	[ -d "$d" ] || { log "$path/$d isn't a dir"; s=1; }
 done
 [ "$s" -gt 0 ] && {
@@ -173,7 +189,10 @@ mkdir "$mount"/private "$mount"/public
 eval "$premount"
 
 [ "$automount" ] && (
-	cd "$data" || exit
+	cd "$data" || {
+		log create a directory named "'$data'"
+		exit 1
+	}
 	for p in * .[!.]* ..[!$]*; do
 		[ -e "$p" ] || continue
 		[ "${p%.dwarfs}" != "$p" ] && {
@@ -185,24 +204,12 @@ eval "$premount"
 	done
 )
 
-[ -n "$wine" ] && {
-	log updating wine...
-	DISPLAY='' WAYLAND_DISPLAY='' "$wine" wineboot
-	binder add "$mount/public" "$WINEPREFIX"
-}
-
 fuse-overlayfs \
 	-o "lowerdir=$mount/public:$mount/private,upperdir=$upper,workdir=$work" \
 	-o "squash_to_uid=$(id -ru),squash_to_gid=$(id -rg)" \
 	"$overlay" && log mounted fuse-overlayfs || exit
 
 eval "$postmount"
-
-[ -n "$wine" ] && {
-	# this is crazy
-	until [ -z "$(lsof +D "$WINEPREFIX" 2>/dev/null)" ]; do true; done
-	mount --bind "$overlay/${WINEPREFIX##*/}" "$WINEPREFIX"
-}
 
 [ "$autocd" ] && {
 	unset dir
@@ -240,8 +247,10 @@ cd "$path" || exit
 	# TODO: check for open files before deduping
 	tmp=$(mktemp)
 	for p in "$mount"/*/*; do
-		log looking for duplicates in "$upper/${p##*/}"
-		find "$upper/${p##*/}" -depth -type f -print0 |
+		upp="$upper/${p##*/}"
+		[ -e "$upp" ] || continue
+		log looking for duplicates in "$upp"
+		find "$upp" -depth -type f -print0 |
 			cut -zb $(($(printf %s "$upper/" | wc -c) + 1))- |
 			awk -v upper="$upper/" -v mount="${p%/*}/" 'BEGIN{RS="\0"; ORS="\0"} {print upper$0; print mount$0}' |
 			unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
