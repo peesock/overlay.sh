@@ -204,6 +204,7 @@ eval "$premount"
 	done
 )
 
+# ponder making overlay/{private,public} too
 fuse-overlayfs \
 	-o "lowerdir=$mount/public:$mount/private,upperdir=$upper,workdir=$work" \
 	-o "squash_to_uid=$(id -ru),squash_to_gid=$(id -rg)" \
@@ -244,7 +245,6 @@ trap - INT
 cd "$path" || exit
 
 [ "$dedupe" ] && {
-	# TODO: check for open files before deduping
 	tmp=$(mktemp)
 	for p in "$mount"/*/*; do
 		upp="$upper/${p##*/}"
@@ -255,13 +255,13 @@ cd "$path" || exit
 			awk -v upper="$upper/" -v mount="${p%/*}/" 'BEGIN{RS="\0"; ORS="\0"} {print upper$0; print mount$0}' |
 			unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
 				until [ $# -le 0 ]; do
-					(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
+					[ -e "$2" ] &&
+						(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
 					shift 2
 				done
 				wait
-				' sh | tee "$tmp" | tr '\0' '\n'
-		# unshare creates a new pid namespace so that pid collisions are impossible
-
+			' sh | tee "$tmp" | tr '\0' '\n'
+			# unshare creates a new pid namespace so that pid collisions are impossible
 		grep -qz . <"$tmp" && {
 			[ "$interactive" ] && {
 				printf "delete these files? y/N: "
@@ -269,6 +269,7 @@ cd "$path" || exit
 			} || line=y
 			case $line in y|Y)
 				xargs -0 rm -- <"$tmp"
+				# todo: better rmdir
 				xargs -0 dirname -z -- <"$tmp" | uniq -z | xargs -0 rmdir -p --ignore-fail-on-non-empty -- 2>/dev/null
 				log removed duplicates
 				;;
