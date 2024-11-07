@@ -98,6 +98,22 @@ mountplacer(){
 	commadd postmount mount --bind "$overlay/${1##*/}" "$1"
 }
 
+automount()(
+	cd "$data" || {
+		log create a directory named "'$data'"
+		exit 1
+	}
+	for p in * .[!.]* ..[!$]*; do
+		[ -e "$p" ] || continue
+		[ "${p%.dwarfs}" != "$p" ] && {
+			mkdir -p "$path/$mount/private/${p%.*}"
+			dwarfs "$p" "$path/$mount/private/${p%.*}" &&
+				log dwarf mounted "$p" && continue
+		}
+		binder add "$mount/private" "$p"
+	done
+)
+
 mount=mount
 upper=upper
 work=work
@@ -110,13 +126,13 @@ while true; do
 	case $1 in
 		-auto)
 			autocd=true
-			automount=true
+			commadd premount automount
 			;;
 		-autocd) # cd into either overlaydir or the only available non-hidden mount dir
 			autocd=true
 			;;
 		-automount) # get all paths in root and mount to lower
-			automount=true
+			commadd premount automount
 			;;
 		-c|-create)
 			creator "$(realpath -m "$2")"
@@ -187,22 +203,6 @@ command mount --make-rslave "$mount"
 mkdir "$mount"/private "$mount"/public
 
 eval "$premount"
-
-[ "$automount" ] && (
-	cd "$data" || {
-		log create a directory named "'$data'"
-		exit 1
-	}
-	for p in * .[!.]* ..[!$]*; do
-		[ -e "$p" ] || continue
-		[ "${p%.dwarfs}" != "$p" ] && {
-			mkdir -p "$path/$mount/private/${p%.*}"
-			dwarfs "$p" "$path/$mount/private/${p%.*}" &&
-				log dwarf mounted "$p" && continue
-		}
-		binder add "$mount/private" "$p"
-	done
-)
 
 # ponder making overlay/{private,public} too
 fuse-overlayfs \
