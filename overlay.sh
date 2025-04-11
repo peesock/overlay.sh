@@ -157,6 +157,15 @@ while true; do
 			commadd premount tmpfs "$2"
 			shift
 			;;
+		-mountplace*)
+			if [ "$1" = mountplacexec ]; then
+				mountplacer "$2" "$3"
+				shift 2
+			else
+				mountplacer "$2"
+				shift
+			fi
+			;;
 		-wine) # update wine and mount to lower
 			export WINEPREFIX="$global/$2"
 			mkdir -p "$WINEPREFIX"
