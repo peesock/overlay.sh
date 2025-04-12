@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -x
 # notes:
 # 	socket files don't work until all prior connections are terminated
 # 	moving files from lowerdir will *copy* them, using disk space
@@ -18,40 +18,94 @@ log(){
 mount(){
 	command mount -v "$@" && {
 		eval last=\$$#
-		printf '%s\0' "$last" >>"$path/$mountlog"
+		printf '%s\0' "$last" >>"$Path/$Mountlog"
 	}
 }
 
-bind(){
+# get is read-only, add and free overwrite.
+indexer(){
+	case $1 in
+		get) # index from path
+			{ printf %s\\0 "$2"; cat "$Index"; } | awk '
+				BEGIN{ RS="\0" }
+				{
+					if (NR == 1) key=$0;
+					else if (NR % 2 == 1) {if ($0 == key) print prev}
+					else prev = $0
+				}'
+			;;
+		add) # calculate new index and assign a path to it
+			tmp=$(mktemp -p "$Storage")
+			{ printf %s\\0 "$2"; cat "$Index"; } | awk '
+				BEGIN{ RS="\0"; ORS="\0"; i=0 }
+				{
+					if (NR == 1) path=$0;
+					else { if (NR % 2 == 0){ if ($0 == "free") exit; i++} print $0 }
+				}
+				END{ print i "\0" path }' > "$tmp"
+			mv "$tmp" "$Index"
+			;;
+		free) # search for missing paths and mark as free
+			for dir in $(awk 'BEGIN{RS="\0"}{if (NR % 2 == 1) print $0}' <"$Index"); do
+				[ -d "$Storage/$dir" ] || {
+					freelist="$freelist$dir "
+				}
+			done
+			[ "$freelist" ] && {
+				tmp=$(mktemp -p "$Storage")
+				{ printf %s\\0 "$freelist"; cat "$Index"; } | awk '
+				BEGIN{ RS="\0"; ORS="\0"; n=1 }
+				{
+					if (NR==1) { for (i=1;i<=NF;i++) arr[i] = $i } else {
+					if (NR % 2 == 0 && arr[n] == $0) { print "free"; n++ } else print $0
+					}
+				}' >"$tmp"
+				mv "$tmp" "$Index"
+			}
+			;;
+	esac
+}
+
+# $1 is the input path, remains as-is
+# $2 is the output, relative to overlay
+# `overbind /home/balls /buh/muh` mounts /home/balls to $Overlay/buh/muh.
+overbind(){
 	s=0
-	root="$path/$1"
-	shift
 	while [ $# -gt 0 ]; do
-		dirin=$1
-		dirout=${2#/}
+		pathin=$1
+		pathout=${2#/}
 		if [ -d "$1" ]; then
-			mkdir -p "$root/$dirout"
+			mkdir -p "$Tree/public/$pathout" "$Tree/private/$pathout"
 		else
-			[ "${dirout%/*}" != "$dirout" ] && mkdir -p "$root/${dirout%/*}"
-			touch "$root/$dirout"
+			[ "${pathout%/*}" != "$pathout" ] && mkdir -p "$Tree/public/${pathout%/*}" "$Tree/private/${pathout%/*}"
+			touch "$Tree/public/$pathout" "$Tree/private/$pathout"
 		fi
-		mount -o rbind,ro=recursive -- "$dirin" "$root/$dirout" &&
-			command mount --make-rslave -- "$root/$dirout" || s=1
+		unset I
+		I=$(indexer get "$pathin")
+		[ "$I" ] || {
+			indexer add "$pathin"
+			I=$(indexer get "$pathin")
+		}
+		mkdir -p "$Storage/$I/up" "$Storage/$I/wrk"
+		mount -t overlay overlay -o userxattr \
+			-o "lowerdir=$pathin,upperdir=$Storage/$I/up,workdir=$Storage/$I/wrk" \
+			"$Overlay/$pathout" && log mounted "$pathin" to "$Overlay/$pathout" || s=1
 		shift 2
 	done
 	return $s
 }
 
-binder(){
-	root=$2
-	arg=$(realpath -e -- "$3")
+overbinder(){
+	path=$(realpath --relative-base="$Path" -e -- "$2")
 	case $1 in
-		add)
-			arg2=${arg##*/} ;;
-		root)
-			arg2=$arg ;;
+		add) # add basename of path inside the root of overlay
+			arg2=${path##*/} ;;
+		copy) # copy full path inside overlay
+			arg2=$path ;;
+		free) # mount path anywhere inside overlay
+			arg2=$3
 	esac
-	bind "$root" "$arg" "$arg2"
+	overbind "$path" "$arg2"
 }
 
 creator(){
@@ -66,7 +120,8 @@ creator(){
 		mkdir "$1"
 	fi
 	cd "$1" || exit
-	mkdir "$mount" "$upper" "$work" "$overlay" "$data"
+	mkdir "$Storage" "$Tree" "$Overlay" "$Data"
+	touch "$Index"
 	log created template
 }
 
@@ -81,11 +136,11 @@ commadd(){
 	eval "$v=\$$v"'"$(escapist "$@");"'
 }
 
-tmpfs(){
-	mount -t tmpfs tmpfs -- "$path/$mount/$1"
-}
+# tmpfs(){
+# 	mount -t tmpfs tmpfs -- "$Path/$mount/$1"
+# }
 
-mountplacer(){
+mountplacer(){ # would be more efficient to mount overlays directly, reserved for the future
 	[ -n "$2" ] && {
 		one=$1
 		shift
@@ -93,33 +148,35 @@ mountplacer(){
 		commadd premount "$@"
 		set -- "$one" "$@"
 	}
-	commadd premount binder add "$mount/public" "$1"
+	commadd postmount overbinder add "$1"
 	postmount=$postmount'until [ -z "$(lsof +D '"$(escapist "$1")"' 2>/dev/null)" ]; do true; done;'
-	commadd postmount mount --bind "$overlay/${1##*/}" "$1"
+	commadd postmount mount --bind "$Overlay/${1##*/}" "$1"
 }
 
 automount()(
-	cd "$data" || {
-		log create a directory named "'$data'"
+	cd "$Data" || {
+		log create a directory named "'$Data'"
 		exit 1
 	}
 	for p in * .[!.]* ..[!$]*; do
 		[ -e "$p" ] || continue
 		[ "${p%.dwarfs}" != "$p" ] && {
-			mkdir -p "$path/$mount/private/${p%.*}"
-			dwarfs "$p" "$path/$mount/private/${p%.*}" &&
-				log dwarf mounted "$p" && continue
+			dwarfdir="$Path/$Tree/private/${p%.*}"
+			mkdir -p "$dwarfdir"
+			dwarfs "$p" "$dwarfdir" &&
+				log dwarf mounted "$p" &&
+				overbinder add "$dwarfdir"
 		}
-		binder add "$mount/private" "$p"
+		overbinder add "$p"
 	done
 )
 
-mount=mount
-upper=upper
-work=work
-overlay=overlay
-mountlog=mountlog
-data=data
+Storage=storage
+Overlay=overlay
+Tree=tree
+Data=$Storage/data
+Index=$Storage/index
+Mountlog=$Storage/mountlog
 export XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
 global=$XDG_DATA_HOME/$programName
 while true; do
@@ -144,19 +201,18 @@ while true; do
 		-i|-interactive) # prompt before deleting
 			interactive=true
 			;;
-		-bind*|-mnt*)
-			[ "${1#'-bind'}" != "$1" ] && root=$overlay var=postmount || root=$mount/private var=premount
+		-mnt*)
 			case $1 in
-				*add) commadd $var binder add "$root" "$2";;
-				*root) commadd $var binder root "$root" "$2";;
-				*) commadd $var bind "$root" "$2" "$3"; shift;;
+				*add) commadd postmount overbinder add "$2";;
+				*copy) commadd postmount overbinder copy "$2";;
+				*) commadd postmount overbinder free "$2" "$3"; shift;;
 			esac
 			shift
 			;;
-		-tmpfs)
-			commadd premount tmpfs "$2"
-			shift
-			;;
+		# -tmpfs)
+		# 	commadd premount tmpfs "$2"
+		# 	shift
+		# 	;;
 		-mountplace*)
 			if [ "$1" = mountplacexec ]; then
 				mountplacer "$2" "$3"
@@ -188,52 +244,51 @@ while true; do
 done
 
 if [ $# -ge 1 ]; then
-	path=$(realpath -e -- "$1")
-	[ -z "$path" ] && exit 1
+	Path=$(realpath -e -- "$1")
+	[ -z "$Path" ] && exit 1
 	shift
 else
-	path=$(realpath .)
+	Path=$(realpath .)
 fi
-cd "$path" || exit
-s=0; for d in "$mount" "$upper" "$work" "$overlay"; do
-	[ -d "$d" ] || { log "$path/$d isn't a dir"; s=1; }
+cd "$Path" || exit
+s=0; for d in "$Storage" "$Overlay" "$Tree"; do
+	[ -d "$d" ] || { log "$Path/$d isn't a dir"; s=1; }
 done
 [ "$s" -gt 0 ] && {
-	log "$path isn't properly formatted"
+	log "$Path isn't properly formatted"
 	exit 1
 }
-grep -zq . "$mountlog" 2>/dev/null && {
-	log "$path/$mountlog" is not empty, indicating bad unmounting
+grep -zq . "$Mountlog" 2>/dev/null && {
+	log "$Path/$Mountlog" is not empty, indicating bad unmounting. Investigate and/or remove the file.
 	exit 1
 }
-trap 'rm "$mountlog"' EXIT
-mount -t tmpfs tmpfs "$mount"
-command mount --make-rslave "$mount"
-mkdir "$mount"/private "$mount"/public
 
+trap 'rm "$Mountlog"' EXIT
+command mount -t tmpfs tmpfs "$Tree"
+command mount --make-rslave "$Tree"
+mkdir "$Tree/private" "$Tree/public"
+
+# commands that need to run before mounting
 eval "$premount"
 
-# ponder making overlay/{private,public} too
-fuse-overlayfs \
-	-o "lowerdir=$mount/public:$mount/private,upperdir=$upper,workdir=$work" \
-	-o "squash_to_uid=$(id -ru),squash_to_gid=$(id -rg)" \
-	"$overlay" && log mounted fuse-overlayfs || exit
+overbind "$Tree/public" /
 
+# commands that need to run after mounting
 eval "$postmount"
 
 [ "$autocd" ] && {
 	unset dir
-	for p in "$mount"/private/*; do
+	for p in "$Tree/private"/*; do
 		[ -d "$p" ] && {
 			if [ -z "$dir" ]; then
-				dir=$overlay/${p##*/}
+				dir=$Overlay/${p##*/}
 			else
-				dir=$overlay
+				dir=$Overlay
 				break
 			fi
 		}
 	done
-	cd "${dir-"$overlay"}" || exit
+	cd "${dir-"$Overlay"}" || exit
 }
 
 trap 'log INT recieved' INT # TODO: signal handling
@@ -251,9 +306,11 @@ echo
 log exiting...
 trap - INT
 
-cd "$path" || exit
+cd "$Path" || exit
 
 [ "$dedupe" ] && {
+	log dedupe? erm not yet sweetheart
+	return
 	tmp=$(mktemp)
 	for p in "$mount"/*/*; do
 		upp="$upper/${p##*/}"
@@ -261,6 +318,7 @@ cd "$path" || exit
 		log looking for duplicates in "$upp"
 		find "$upp" -depth -type f -print0 |
 			cut -zb $(($(printf %s "$upper/" | wc -c) + 1))- |
+			# BUG!!!!!!!!!!!! BUG!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 			awk -v upper="$upper/" -v mount="${p%/*}/" 'BEGIN{RS="\0"; ORS="\0"} {print upper$0; print mount$0}' |
 			unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
 				until [ $# -le 0 ]; do
@@ -289,25 +347,25 @@ cd "$path" || exit
 }
 
 { # not foolproof but helps
-	n=$(tr -cd '\0' <"$mountlog" | wc -c)
+	n=$(tr -cd '\0' <"$Mountlog" | wc -c)
 	[ "$n" ] || return
 	for i in $(seq 1 "$n" | tac); do
-		line=$(sed -zn "$i"p <"$mountlog")
+		line=$(sed -zn "$i"p <"$Mountlog")
 		umount -vr -- "$line"
 	done
 }
-until err=$(umount "$overlay" 2>&1) && log unmounted overlayfs; do
-	pidlist=$(fuser -Mm "$overlay" 2>/dev/null) || {
-		mountpoint -q "$overlay" || break
+until err=$(umount "$Overlay" 2>&1) && log unmounted overlayfs; do
+	pidlist=$(fuser -Mm "$Overlay" 2>/dev/null) || {
+		mountpoint -q "$Overlay" || break
 		# if there are no processes but overlay is still mounted, lazy umount
-		umount -l "$overlay"
+		umount -l "$Overlay"
 		log lazily unmounted overlayfs
 		break
 	}
 	if [ "$pidlist" != "$prevlist" ]; then
 		echo "$err"
 		# ps -p "$(echo "$pidlist" | sed 's/\s\+/,/g; s/^,\+//')"
-		fuser -vmM "$overlay"
+		fuser -vmM "$Overlay"
 		change=1
 	elif [ "$change" -eq 1 ]; then
 		log waiting...
@@ -317,4 +375,4 @@ until err=$(umount "$overlay" 2>&1) && log unmounted overlayfs; do
 
 	sleep 1
 done
-umount -l "$mount"
+umount -l "$Tree"
