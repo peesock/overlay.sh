@@ -1,4 +1,14 @@
 #!/bin/sh -x
+
+# todo:
+# 	fix dedupe
+# 	bind mount lowerdirs to tree/private
+# 	bind mount upperdirs to tree/public
+# 	rename tree/{public,private}
+# 	re-add option to bind mount dirs onto the overlay?
+# 	make indexer free do more and run it in exiter
+#			note: indexer get will ignore free spaces
+
 # notes:
 # 	socket files don't work until all prior connections are terminated
 # 	moving files from lowerdir will *copy* them, using disk space
@@ -22,7 +32,7 @@ mount(){
 	}
 }
 
-# get is read-only, add and free overwrite.
+# get is read-only, while add and free overwrite index.
 indexer(){
 	case $1 in
 		get) # index from path
@@ -109,7 +119,7 @@ overbinder(){
 }
 
 creator(){
-	if [ -e "$1" ]; then
+	if [ -e "$1" ] && ! ([ -d "$1" ] && ! find "$1" -maxdepth 1 -mindepth 1 | grep -q .); then
 		log "'$1'" exists, moving into folder of same name
 		tmp=$(mktemp -up "${1%/*}")
 		mv -T "$1" "$tmp" || return 1
@@ -117,7 +127,7 @@ creator(){
 		mv -T "$tmp" "$1/${1##*/}" &&
 			log moved "'$1'" to "'$1/${1##*/}'"
 	else
-		mkdir "$1"
+		mkdir -p "$1"
 	fi
 	cd "$1" || exit
 	mkdir "$Storage" "$Tree" "$Overlay" "$Data"
@@ -144,32 +154,48 @@ mountplacer(){ # would be more efficient to mount overlays directly, reserved fo
 	[ -n "$2" ] && {
 		one=$1
 		shift
-		commadd premount log running "'$*'"...
-		commadd premount "$@"
+		commadd arr1 log running "'$*'"...
+		commadd arr1 "$@"
 		set -- "$one" "$@"
 	}
-	commadd postmount overbinder add "$1"
-	postmount=$postmount'until [ -z "$(lsof +D '"$(escapist "$1")"' 2>/dev/null)" ]; do true; done;'
-	commadd postmount mount --bind "$Overlay/${1##*/}" "$1"
+	commadd arr1 overbinder add "$1"
+	arr2=$arr2'until [ -z "$(lsof +D '"$(escapist "$1")"' 2>/dev/null)" ]; do true; done;'
+	commadd arr2 mount --bind "$Overlay/${1##*/}" "$1"
 }
 
-automount()(
-	cd "$Data" || {
+autodiradd(){
+	if [ "$autodir" ]; then
+		autodir=.
+	else
+		autodir=$1
+	fi
+}
+
+automount(){
+	[ -d "$Data" ] || {
 		log create a directory named "'$Data'"
-		exit 1
+		return 1
 	}
-	for p in * .[!.]* ..[!$]*; do
+	for p in "$Data"/*; do
 		[ -e "$p" ] || continue
 		[ "${p%.dwarfs}" != "$p" ] && {
-			dwarfdir="$Path/$Tree/private/${p%.*}"
+			dwarfdir="$Path/$Tree/private/${p##*/}"
+			dwarfdir="${dwarfdir%.*}"
 			mkdir -p "$dwarfdir"
 			dwarfs "$p" "$dwarfdir" &&
 				log dwarf mounted "$p" &&
-				overbinder add "$dwarfdir"
+				overbinder add "$dwarfdir" &&
+				autodiradd "${dwarfdir##*/}"
+			continue
 		}
-		overbinder add "$p"
+		overbinder add "$p" &&
+			autodiradd "${p##*/}"
 	done
-)
+}
+
+exiter(){
+	rm "$Mountlog"
+}
 
 Storage=storage
 Overlay=overlay
@@ -181,15 +207,15 @@ export XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
 global=$XDG_DATA_HOME/$programName
 while true; do
 	case $1 in
-		-auto)
-			autocd=true
-			commadd premount automount
-			;;
-		-autocd) # cd into either overlaydir or the only available non-hidden mount dir
-			autocd=true
-			;;
-		-automount) # get all paths in root and mount to lower
-			commadd premount automount
+		-auto*)
+			case $1 in
+				-auto) commadd arr1 automount; autocd=true;;
+				# mount things in $Data
+				-automount) commadd arr1 automount;;
+				# cd to either the only directory in overlay, the only automounted dir, or just overlay
+				# (currently just for automount)
+				-autocd) autocd=true;;
+			esac
 			;;
 		-c|-create)
 			creator "$(realpath -m "$2")"
@@ -203,14 +229,14 @@ while true; do
 			;;
 		-mnt*)
 			case $1 in
-				*add) commadd postmount overbinder add "$2";;
-				*copy) commadd postmount overbinder copy "$2";;
-				*) commadd postmount overbinder free "$2" "$3"; shift;;
+				*add) commadd arr1 overbinder add "$2";;
+				*copy) commadd arr1 overbinder copy "$2";;
+				*) commadd arr1 overbinder free "$2" "$3"; shift;;
 			esac
 			shift
 			;;
 		# -tmpfs)
-		# 	commadd premount tmpfs "$2"
+		# 	commadd arr1 tmpfs "$2"
 		# 	shift
 		# 	;;
 		-mountplace*)
@@ -263,32 +289,19 @@ grep -zq . "$Mountlog" 2>/dev/null && {
 	exit 1
 }
 
-trap 'rm "$Mountlog"' EXIT
+trap exiter EXIT
 command mount -t tmpfs tmpfs "$Tree"
 command mount --make-rslave "$Tree"
 mkdir "$Tree/private" "$Tree/public"
 
-# commands that need to run before mounting
-eval "$premount"
-
 overbind "$Tree/public" /
 
+eval "$arr1"
 # commands that need to run after mounting
-eval "$postmount"
+eval "$arr2"
 
 [ "$autocd" ] && {
-	unset dir
-	for p in "$Tree/private"/*; do
-		[ -d "$p" ] && {
-			if [ -z "$dir" ]; then
-				dir=$Overlay/${p##*/}
-			else
-				dir=$Overlay
-				break
-			fi
-		}
-	done
-	cd "${dir-"$Overlay"}" || exit
+	cd "$Overlay/$autodir" || exit
 }
 
 trap 'log INT recieved' INT # TODO: signal handling
@@ -346,7 +359,7 @@ cd "$Path" || exit
 	rm "$tmp"
 }
 
-{ # not foolproof but helps
+{
 	n=$(tr -cd '\0' <"$Mountlog" | wc -c)
 	[ "$n" ] || return
 	for i in $(seq 1 "$n" | tac); do
