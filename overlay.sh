@@ -1,13 +1,8 @@
-#!/bin/sh -x
+#!/bin/sh
 
 # todo:
-# 	fix dedupe
-# 	bind mount lowerdirs to tree/private
-# 	bind mount upperdirs to tree/public
-# 	rename tree/{public,private}
 # 	re-add option to bind mount dirs onto the overlay?
 # 	make indexer free do more and run it in exiter
-#			note: indexer get will ignore free spaces
 
 # notes:
 # 	socket files don't work until all prior connections are terminated
@@ -83,12 +78,15 @@ overbind(){
 	s=0
 	while [ $# -gt 0 ]; do
 		pathin=$1
-		pathout=${2#/}
+		pathout=$(realpath -mLsz -- "/$2"; echo x)
+		pathout=${pathout%x}
+		pathout=${pathout#/}
 		if [ -d "$1" ]; then
-			mkdir -p "$Tree/public/$pathout" "$Tree/private/$pathout"
+			mkdir -p "$Upper/$pathout" "$Lower/$pathout"
 		else
-			[ "${pathout%/*}" != "$pathout" ] && mkdir -p "$Tree/public/${pathout%/*}" "$Tree/private/${pathout%/*}"
-			touch "$Tree/public/$pathout" "$Tree/private/$pathout"
+			[ "${pathout%/*}" != "$pathout" ] &&
+				mkdir -p "$Upper/${pathout%/*}" "$Lower/${pathout%/*}"
+			touch "$Upper/$pathout" "$Lower/$pathout"
 		fi
 		unset I
 		I=$(indexer get "$pathin")
@@ -99,14 +97,22 @@ overbind(){
 		mkdir -p "$Storage/$I/up" "$Storage/$I/wrk"
 		mount -t overlay overlay -o userxattr \
 			-o "lowerdir=$pathin,upperdir=$Storage/$I/up,workdir=$Storage/$I/wrk" \
-			"$Overlay/$pathout" && log mounted "$pathin" to "$Overlay/$pathout" || s=1
+			"$Overlay/$pathout" &&
+			log mounted "$pathin" to "$Overlay/$pathout" &&
+			[ "$pathout" ] && {
+			[ "$pathin" != "$Lower/$pathout" ] && {
+				mount -o bind,ro -- "$pathin" "$Lower/$pathout" || s=1
+			}
+			mount -o bind -- "$Storage/$I/up" "$Upper/$pathout" || s=1
+		} || s=1
 		shift 2
 	done
 	return $s
 }
 
 overbinder(){
-	path=$(realpath --relative-base="$Path" -e -- "$2")
+	path=$(realpath --relative-base="$Path" -ez -- "$2"; echo x)
+	path=${path%x}
 	case $1 in
 		add) # add basename of path inside the root of overlay
 			arg2=${path##*/} ;;
@@ -176,20 +182,21 @@ automount(){
 		log create a directory named "'$Data'"
 		return 1
 	}
-	for p in "$Data"/*; do
-		[ -e "$p" ] || continue
-		[ "${p%.dwarfs}" != "$p" ] && {
-			dwarfdir="$Path/$Tree/private/${p##*/}"
+	for low in "$Data"/* "$Data"/..[!$]* "$Data"/.[!.]*; do
+		[ -e "$low" ] || continue
+		[ "${low%.dwarfs}" != "$low" ] && {
+			dwarfdir="$Path/$Lower/${low##*/}"
 			dwarfdir="${dwarfdir%.*}"
 			mkdir -p "$dwarfdir"
-			dwarfs "$p" "$dwarfdir" &&
-				log dwarf mounted "$p" &&
+			dwarfs "$low" "$dwarfdir" &&
+				printf %s\\0 "$dwarfdir" >> "$Mountlog" &&
+				log dwarf mounted "$low" &&
 				overbinder add "$dwarfdir" &&
 				autodiradd "${dwarfdir##*/}"
 			continue
 		}
-		overbinder add "$p" &&
-			autodiradd "${p##*/}"
+		overbinder add "$low" &&
+			autodiradd "${low##*/}"
 	done
 }
 
@@ -200,11 +207,14 @@ exiter(){
 Storage=storage
 Overlay=overlay
 Tree=tree
+Upper=$Tree/upper
+Lower=$Tree/lower
 Data=$Storage/data
 Index=$Storage/index
 Mountlog=$Storage/mountlog
 export XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
 global=$XDG_DATA_HOME/$programName
+
 while true; do
 	case $1 in
 		-auto*)
@@ -292,9 +302,9 @@ grep -zq . "$Mountlog" 2>/dev/null && {
 trap exiter EXIT
 command mount -t tmpfs tmpfs "$Tree"
 command mount --make-rslave "$Tree"
-mkdir "$Tree/private" "$Tree/public"
+mkdir "$Lower" "$Upper"
 
-overbind "$Tree/public" /
+overbind "$Lower" /
 
 eval "$arr1"
 # commands that need to run after mounting
@@ -322,17 +332,17 @@ trap - INT
 cd "$Path" || exit
 
 [ "$dedupe" ] && {
-	log dedupe? erm not yet sweetheart
-	return
 	tmp=$(mktemp)
-	for p in "$mount"/*/*; do
-		upp="$upper/${p##*/}"
-		[ -e "$upp" ] || continue
-		log looking for duplicates in "$upp"
-		find "$upp" -depth -type f -print0 |
-			cut -zb $(($(printf %s "$upper/" | wc -c) + 1))- |
-			# BUG!!!!!!!!!!!! BUG!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-			awk -v upper="$upper/" -v mount="${p%/*}/" 'BEGIN{RS="\0"; ORS="\0"} {print upper$0; print mount$0}' |
+	for low in "$Lower"/* "$Lower"/..[!$]* "$Lower"/.[!.]*; do
+		[ -e "$low" ] || continue
+		up="$Upper/${low##*/}"
+		# [ -e "$up" ] || continue
+		log looking for duplicates in "$up"
+		find "$up" -depth -type f -print0 |
+			cut -zb "$(printf %s "$Upper/" | wc -c)"- |
+			awk -v "upper=$Upper" -v "lower=$Lower" '
+				BEGIN{ RS="\0"; ORS="\0" }
+				{ print upper $0 "\0" lower $0 }' |
 			unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
 				until [ $# -le 0 ]; do
 					[ -e "$2" ] &&
