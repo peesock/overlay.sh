@@ -1,10 +1,15 @@
 #!/bin/sh
 
 # todo:
-# 	re-add option to bind mount dirs onto the overlay?
 # 	make indexer free do more and run it in exiter
+# 	recursive overmounts
+# 	remove specific code. add some API to replace it
 
 # notes:
+# 	KERNEL BUG!!!!!!!!!!!!!!! it's not possible to mount overlay upperdirs on fuse in a new user namespace,
+# 		so this can't be used on fuse right now. investigating now as of committing this unseen comment...
+# 	KERNEL BUG 2!!!!!!!!!!!!! your lowerdir cannot have an odd number of double quotes in the path.
+
 # 	socket files don't work until all prior connections are terminated
 # 	moving files from lowerdir will *copy* them, using disk space
 
@@ -21,7 +26,7 @@ log(){
 }
 
 mount(){
-	command mount -v "$@" && {
+	command mount "$@" && {
 		eval last=\$$#
 		printf '%s\0' "$last" >>"$Path/$Mountlog"
 	}
@@ -34,8 +39,8 @@ indexer(){
 			{ printf %s\\0 "$2"; cat "$Index"; } | awk '
 				BEGIN{ RS="\0" }
 				{
-					if (NR == 1) key=$0;
-					else if (NR % 2 == 1) {if ($0 == key) print prev}
+					if (NR == 1) path=$0;
+					else if (NR % 2 == 1) {if ($0 == path && prev != "free") print prev}
 					else prev = $0
 				}'
 			;;
@@ -50,9 +55,10 @@ indexer(){
 				END{ print i "\0" path }' > "$tmp"
 			mv "$tmp" "$Index"
 			;;
-		free) # search for missing paths and mark as free
+		free)
+			# search for nonexistent or empty paths in index and mark as free
 			for dir in $(awk 'BEGIN{RS="\0"}{if (NR % 2 == 1) print $0}' <"$Index"); do
-				[ -d "$Storage/$dir" ] || {
+				[ ! -d "$Storage/$dir" ] || find "$Storage/$dir/up" -maxdepth 1 -mindepth 1 | grep -q . || {
 					freelist="$freelist$dir "
 				}
 			done
@@ -68,6 +74,10 @@ indexer(){
 				mv "$tmp" "$Index"
 			}
 			;;
+		clean)
+			# rmdir
+			# for dirs; do if entry missing or free, rmdir?
+			;;
 	esac
 }
 
@@ -76,52 +86,55 @@ indexer(){
 # `overbind /home/balls /buh/muh` mounts /home/balls to $Overlay/buh/muh.
 overbind(){
 	s=0
-	while [ $# -gt 0 ]; do
-		pathin=$1
-		pathout=$(realpath -mLsz -- "/$2"; echo x)
-		pathout=${pathout%x}
-		pathout=${pathout#/}
-		if [ -d "$1" ]; then
-			mkdir -p "$Upper/$pathout" "$Lower/$pathout"
-		else
-			[ "${pathout%/*}" != "$pathout" ] &&
-				mkdir -p "$Upper/${pathout%/*}" "$Lower/${pathout%/*}"
-			touch "$Upper/$pathout" "$Lower/$pathout"
-		fi
-		unset I
+	pathin=$1
+	pathout=$2
+	if [ -d "$pathin" ]; then
+		mkdir -p "$Upper/$pathout" "$Lower/$pathout"
+	else
+		[ "${pathout%/*}" != "$pathout" ] &&
+			mkdir -p "$Upper/${pathout%/*}" "$Lower/${pathout%/*}"
+		touch "$Upper/$pathout" "$Lower/$pathout"
+	fi
+	unset I
+	I=$(indexer get "$pathin")
+	[ "$I" ] || {
+		indexer add "$pathin"
 		I=$(indexer get "$pathin")
-		[ "$I" ] || {
-			indexer add "$pathin"
-			I=$(indexer get "$pathin")
-		}
+		[ "$I" ] || exit 1
 		mkdir -p "$Storage/$I/up" "$Storage/$I/wrk"
-		mount -t overlay overlay -o userxattr \
-			-o "lowerdir=$pathin,upperdir=$Storage/$I/up,workdir=$Storage/$I/wrk" \
-			"$Overlay/$pathout" &&
-			log mounted "$pathin" to "$Overlay/$pathout" &&
-			[ "$pathout" ] && {
-			[ "$pathin" != "$Lower/$pathout" ] && {
-				mount -o bind,ro -- "$pathin" "$Lower/$pathout" || s=1
-			}
-			mount -o bind -- "$Storage/$I/up" "$Upper/$pathout" || s=1
-		} || s=1
-		shift 2
-	done
+		log added index "$I"
+	}
+	mount -t overlay overlay \
+		-o "lowerdir=$(printf %s "$pathin"|sed 's/\\/\\\\/g;s/,/\\,/g;s/:/\\:/g')" \
+		-o "upperdir=$Storage/$I/up,workdir=$Storage/$I/wrk" \
+		"$Overlay/$pathout" &&
+		log overlay "$pathin --> $Overlay/$pathout" &&
+		[ "$pathout" ] && { # logic note
+		[ "$pathin" != "$Lower/$pathout" ] && {
+			mount -o bind,ro -- "$pathin" "$Lower/$pathout" &&
+				log bound "$pathin --> $Lower/$pathout" || s=1
+		}
+		mount -o bind -- "$Storage/$I/up" "$Upper/$pathout" &&
+			log bound "$Storage/$I/up --> $Upper/$pathout" || s=1
+	} || s=1
 	return $s
 }
 
 overbinder(){
-	path=$(realpath --relative-base="$Path" -ez -- "$2"; echo x)
-	path=${path%x}
+	pathin=$(realpath --relative-base="$Path" -ez -- "$2"; echo x)
+	pathin=${pathin%x}
 	case $1 in
 		add) # add basename of path inside the root of overlay
-			arg2=${path##*/} ;;
+			pathout=${pathin##*/} ;;
 		copy) # copy full path inside overlay
-			arg2=$path ;;
+			pathout=$pathin ;;
 		free) # mount path anywhere inside overlay
-			arg2=$3
+			pathout=$3
 	esac
-	overbind "$path" "$arg2"
+	pathout=$(realpath -mLsz -- "/$pathout"; echo x)
+	pathout=${pathout%x}
+	pathout=${pathout#/}
+	overbind "$pathin" "$pathout"
 }
 
 creator(){
@@ -136,7 +149,7 @@ creator(){
 		mkdir -p "$1"
 	fi
 	cd "$1" || exit
-	mkdir "$Storage" "$Tree" "$Overlay" "$Data"
+	mkdir "$Tree" "$Storage" "$Data"
 	touch "$Index"
 	log created template
 }
@@ -151,10 +164,6 @@ commadd(){
 	shift
 	eval "$v=\$$v"'"$(escapist "$@");"'
 }
-
-# tmpfs(){
-# 	mount -t tmpfs tmpfs -- "$Path/$mount/$1"
-# }
 
 mountplacer(){ # would be more efficient to mount overlays directly, reserved for the future
 	[ -n "$2" ] && {
@@ -204,9 +213,9 @@ exiter(){
 	rm "$Mountlog"
 }
 
-Storage=storage
-Overlay=overlay
 Tree=tree
+Storage=storage
+Overlay=$Tree/overlay
 Upper=$Tree/upper
 Lower=$Tree/lower
 Data=$Storage/data
@@ -287,7 +296,7 @@ else
 	Path=$(realpath .)
 fi
 cd "$Path" || exit
-s=0; for d in "$Storage" "$Overlay" "$Tree"; do
+s=0; for d in "$Storage" "$Tree"; do
 	[ -d "$d" ] || { log "$Path/$d isn't a dir"; s=1; }
 done
 [ "$s" -gt 0 ] && {
@@ -302,9 +311,9 @@ grep -zq . "$Mountlog" 2>/dev/null && {
 trap exiter EXIT
 command mount -t tmpfs tmpfs "$Tree"
 command mount --make-rslave "$Tree"
-mkdir "$Lower" "$Upper"
+mkdir "$Lower" "$Upper" "$Overlay"
 
-overbind "$Lower" /
+overbind "$Lower"
 
 eval "$arr1"
 # commands that need to run after mounting
@@ -398,4 +407,4 @@ until err=$(umount "$Overlay" 2>&1) && log unmounted overlayfs; do
 
 	sleep 1
 done
-umount -l "$Tree"
+umount -vl "$Tree"
