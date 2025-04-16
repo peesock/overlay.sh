@@ -40,7 +40,7 @@ indexer(){
 				BEGIN{ RS="\0" }
 				{
 					if (NR == 1) path=$0;
-					else if (NR % 2 == 1) {if ($0 == path && prev != "free") print prev}
+					else if (NR % 2 == 1) {if ($0 == path) print prev}
 					else prev = $0
 				}'
 			;;
@@ -50,13 +50,17 @@ indexer(){
 				BEGIN{ RS="\0"; ORS="\0"; i=0 }
 				{
 					if (NR == 1) path=$0;
-					else { if (NR % 2 == 0){ if ($0 == "free") exit; i++} print $0 }
+					else {
+						if (NR % 2 == 0) i++;
+						print $0;
+					}
 				}
 				END{ print i "\0" path }' > "$tmp"
 			mv "$tmp" "$Index"
 			;;
-		free)
-			# search for nonexistent or empty paths in index and mark as free
+		clean)
+			# search for nonexistent or empty paths in index, look ahead to next
+			# taken path, move to free, repeat until end, and delete all frees
 			for dir in $(awk 'BEGIN{RS="\0"}{if (NR % 2 == 1) print $0}' <"$Index"); do
 				[ ! -d "$Storage/$dir" ] || find "$Storage/$dir/up" -maxdepth 1 -mindepth 1 | grep -q . || {
 					freelist="$freelist$dir "
@@ -65,18 +69,40 @@ indexer(){
 			[ "$freelist" ] && {
 				tmp=$(mktemp -p "$Storage")
 				{ printf %s\\0 "$freelist"; cat "$Index"; } | awk '
-				BEGIN{ RS="\0"; ORS="\0"; n=1 }
-				{
-					if (NR==1) { for (i=1;i<=NF;i++) arr[i] = $i } else {
-					if (NR % 2 == 0 && arr[n] == $0) { print "free"; n++ } else print $0
+					BEGIN{ RS="\0"; ORS="\0"; a=1; e=1; m=1; }
+					{
+						if (!line) { for (i=1; i<=NF; i++) empty[i] = $i; line=1; NR--; } else {
+							array[a++] = $0;
+							if (NR % 2 == 1){
+								if ($0 == empty[e]){ empty[e] = NR; e++; }
+								else if (e > 1) { movable[m] = NR; m++; }
+							}
+						}
 					}
-				}' >"$tmp"
-				mv "$tmp" "$Index"
+					END {
+						w=1;
+						for (i in movable){
+							if (i < e){ write[w] = (empty[i]-1)/2; }
+							else write[w] = write[w-2]+1;
+							write[w+1] = array[movable[i]+1];
+							print array[movable[i]] ORS write[w];
+							w += 2;
+						}
+						for (i=i+1; i<e; i++) array[empty[i]] ORS array[empty[i]];
+						print "";
+						for (i=1; i<empty[1]; i++) print array[i];
+						for (w in write) print write[w];
+					}' >"$tmp"
+				n=$(($(grep -znm1 '^$' <"$tmp" | cut -b1) - 1))
+				sed -zn "1,${n}p" <"$tmp" | xargs -0 sh -c '
+					while [ "$2" ]; do
+						[ -e "'"$Storage/"'$2" ] && { rm -vrf "'"$Storage/"'$2" || exit; }
+						[ "$1" != "$2" ] && { mv -vT "'"$Storage/"'$1" "'"$Storage/"'$2" || exit; }
+						shift 2
+					done; [ ! "$1" ]' sh &&
+					sed -zn $((n + 2))',$p' <"$tmp" >"$Index" && rm "$tmp" ||
+					log error while cleaning the index. check it out
 			}
-			;;
-		clean)
-			# rmdir
-			# for dirs; do if entry missing or free, rmdir?
 			;;
 	esac
 }
@@ -211,6 +237,7 @@ automount(){
 
 exiter(){
 	rm "$Mountlog"
+	[ "$clean" ] && indexer clean
 }
 
 Tree=tree
@@ -240,6 +267,9 @@ while true; do
 			creator "$(realpath -m "$2")"
 			exit
 			;;
+		-clean)
+			clean=true
+			;;
 		-dedupe) # compare lowerdirs with corresponding overlay dirs and remove dupes
 			dedupe=true
 			;;
@@ -254,10 +284,6 @@ while true; do
 			esac
 			shift
 			;;
-		# -tmpfs)
-		# 	commadd arr1 tmpfs "$2"
-		# 	shift
-		# 	;;
 		-mountplace*)
 			if [ "$1" = mountplacexec ]; then
 				mountplacer "$2" "$3"
@@ -329,7 +355,6 @@ if [ $# -ge 1 ]; then
 elif [ -t 1 ]; then
 	log entering shell...
 	"$SHELL"
-	log returning...
 else
 	log provide a command.
 	exit 1
