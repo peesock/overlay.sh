@@ -3,9 +3,10 @@
 # todo:
 # 	recursive overmounts
 # 	remove specific code. add some API to replace it
+# 	allow files in $Data
 
 # notes:
-# 	KERNEL BUG! your lowerdir (-mnt* options) cannot have an odd number of double quotes in the path.
+# 	utils-linux BUG! your lowerdir (-mnt* options) cannot have an odd number of double quotes in the path.
 
 # 	Putting $Storage on a fuse mount will fail if it was mounted in a different user namespace.
 # 	To avoid using root, you can run `unshare -cm --keep-caps "$SHELL"` to drop into a privileged
@@ -35,7 +36,6 @@ mount(){
 	}
 }
 
-# get is read-only, while add and free overwrite index.
 indexer(){
 	case $1 in
 		get) # index from path

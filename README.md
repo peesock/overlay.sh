@@ -1,6 +1,6 @@
 # Overlay.sh
 
-ALPHA software that allows you to run commands inside a fuse-overlayfs environment.
+Alpha software that allows you to create a complex overlayfs environment.
 
 This allows for:
 - Writing to compressed read-only filesystems such as SquashFS or [Dwarfs](https://github.com/mhx/dwarfs)
@@ -9,16 +9,31 @@ This allows for:
 
 # How it works
 
-Overlayfs and its FUSE implementation fuse-overlayfs essentially combine a read-only directory (lowerdir) with a read-write directory (upperdir) so that the lowerdir can be written to.
+Overlayfs is a linux filesystem that can combine a read-only directory (lowerdir) with a read-write directory (upperdir) in one directory, so that you can appear to be writing to the read-only layer, while actually only writing to the upper.
 
-There are plenty of good explanations of how overlayfs works online, so this is what the script does:
+This is easy to setup on its own, but gets much more tedious if you want more control, such as placing a lowerdir in a different path in the overlay or using multiple separated lowerdirs.
 
-0. create a directory with overlay, mount, upper, work, and data directories inside.
-1. if mounting options are given, mount files/directories into the mount dir.
-2. mount fuse-overlayfs with mount as lowerdir.
-3. run command.
-4. umount overlay. if processes are busy, wait. if odd bind mount behavior keeps it open, lazily umount.
-5. umount everything from step 1.
+overlay.sh automatically sets up an environment to create an arbitrary number of overlayfs mounts under a virtual temporary file tree, so that you have complete freedom to place as many lowerdirs wherever you want.
+
+If you want to mount a directory `/etc` (`$pathin`) to a location inside the overlay mount as `/fake/etc` (`$pathout`), here's what happens:
+
+- Create permanent directories `tree`, `storage`, and `storage/data` for later use.
+- Mount a tmpfs on `tree`.
+- Create `tree/overlay` and `tree/{upper,lower}/$pathout`.
+    Tree now contains `overlay`, `upper/fake/etc`, and `lower/fake/etc`.
+- Mount an overlayfs with a `tree/upper` lowerdir, and a `storage/0` upperdir on `tree/overlay`.
+    Tree now additionally contains `overlay/fake/etc`.
+- Check the `storage/index` file to see if `$pathin` was mounted before.
+- If not, calculate the next integer-named directory under which to place this path's upperdir data. In this case, 1.
+- Mount overlayfs using `$pathin` as lowerdir, `storage/[number]` as an upperdir, and `tree/overlay/$pathout` as the mountpoint.
+    `tree/overlay/fake/etc` now contains all of your files from `/etc`.
+- Bind-mount `$pathin` to `tree/lower/$pathout`.
+- Bind-mount `storage/[number]` to `tree/upper/$pathout`.
+    `tree/upper` now contains an easy view of your writable directories, and `tree/lower` shows the read-only ones, for convenience.
+    These bind mounts do not appear in the first overlay we created, because submounts are invisible to overlayfs.
+- Drop into your $SHELL or run a specified command.
+- Unmount all mounts. In most cases you only need to exit, and the destruction of the mount namespace will unmount all included filesystems, but not all.
+- If processes are busy, wait. if odd bind mount behavior keeps it open, lazily umount.
 
 # Usage
 
@@ -32,71 +47,32 @@ if no directory is specified, $PWD is used.
 
 - -auto: autocd + automount.
 
-- -autocd: if there's 1 non-hidden mount dir, cd into it. otherwise cd into the root overlay dir.
+- -autocd: cd into either the only available automounted directory, or `tree/overlay`.
 
-- -automount: take all files and dirs in data dir and mount to mount dir.
+- -automount: take all files and dirs in `storage/data` and -mntadd them.
 
-- -c|-create <path>: create and format path, or move path into path/$(basename path) and format.
+- -clean: remove unused index directories in `storage` and re-order them on exit.
 
-- -dedupe: on exit, remove redundant files between mount and upper dir.
+- -c|-create <path>: create and format path. if path exists and isn't empty, place it inside of a newly-made path.
 
-- -i|-interactive: ask before removing files.
+- -dedupe: on exit, remove redundant files between lower and upper dir. this is a common issue when programs update timestamps while using `userxattr` overlayfs mount option.
 
-- -bind|-mnt path1 path2: bind path1 to overlay/path2 or bind path1 to mount/path2.
+- -i|-interactive: ask before removing files with -dedupe.
 
-- -bindadd|-mntadd path: bind path to dir/$(basename path).
+- -mnt path1 path2: bind path1 to overlay/path2 or bind path1 to mount/path2.
 
-- -bindroot|-mntroot path: bind path to dir/path.
+- -mntadd path: overlay path to `overlay/$(basename path)`.
+
+- -mntroot path: overlay path to `overlay/dir/path`.
+
+- -mountplace path: overlay path to `overlay/$(basename path)`, then bind-mount on top of path.
+
+- -mountplacexec path commandstring: run commandstring before doing the same as -mountplace.
+
+- -root: set overlay options for running as root, improves things.
 
 - -wine dirname: update and remount a global wineprefix in $XDG_DATA_HOME/overlay.sh/dirname as overlayfs.
+!!THIS WILL BE REMOVED!!
 
 - -proton dirname: same as wine, but for proton.
-
-## Example
-
-```
-$ ls Noita
-    data  mount  overlay  upper  work
-$ ls Noita/data
-    Noita.dwarfs
-$ overlay.sh -auto -dedupe -proton proton Noita proton noita.exe
-    mount: tmpfs mounted on /home/user/Noita/mount.
-    overlay.sh: running 'proton wineboot'...
-...
-    mount: /home/user/.local/share/overlay.sh/proton bound on /home/user/Noita/mount/public/proton.
-    overlay.sh: dwarf mounted Noita.dwarfs
-    overlay.sh: mounted fuse-overlayfs
-    mount: /home/user/Noita/overlay/proton bound on /home/user/.local/share/overlay.sh/proton.
-... playing game ...
-    overlay.sh: exiting...
-    overlay.sh: looking for duplicates in upper/Noita
-    overlay.sh: looking for duplicates in upper/proton
-    upper/proton/pfx/drive_c/windows/syswow64/openvr_api_dxvk.dll
-...
-    overlay.sh: removed duplicates
-    umount: /home/user/.local/share/overlay.sh/proton (fuse-overlayfs) unmounted
-    umount: /home/user/Noita/mount/public/proton (/dev/mapper/home) unmounted
-    umount: /home/user/Noita/mount (tmpfs) unmounted
-    overlay.sh: unmounted overlayfs
-```
-
-# Caveats
-
-It's still spotty and incomplete and will make breaking changes to both the CLI and the directory format.
-
-The kernel's overlayfs cannot be used, because submounts inside lowerdir are not visible, making it impossible to change dir structure.
-This means we accept the speed losses of the FUSE implementation, so high disk usage applications are not really applicable.
-
-Even kernel overlayfs is a somewhat primitive filesystem, and cannot track file renames or moves without real (not namespaced) root access. Renaming your 500gb mount from game1 to game2 will redundantly copy all 500gb to game2.
-
-Additionally, if you modify 1 byte of a 1gb file, the entire 1gb file will be copied to upperdir before modification. Overlayfs is based on files, not raw data, so is not a perfect diffing tool.
-
-# Design issues
-
-Right now, things like wine usage and dwarfs file mounting are hardcoded into the program despite being highly specific uses, because i don't yet have a model for providing arbitrary environment changing or mounting functions.
-
-# Thanks to
-
-- johncena141 for shipping torrents with this dwarfs+overlayfs strategy
-
-- Dwarfs for being good enough to make writing this script worthwhile
+!!THIS WILL BE REMOVED!!
