@@ -47,7 +47,7 @@ indexer(){
 					else prev = $0
 				}'
 			;;
-		add) # calculate new index and assign a path to it
+		add) # calculate new index and assign a path to it, get index
 			tmp=$(mktemp -p "$Storage")
 			{ printf %s\\0 "$2"; cat "$Index"; } | awk '
 				BEGIN{ RS="\0"; ORS="\0"; i=0 }
@@ -58,8 +58,10 @@ indexer(){
 						print $0;
 					}
 				}
-				END{ print i "\0" path }' > "$tmp"
-			mv "$tmp" "$Index"
+				END{ print i ORS path ORS i }' > "$tmp"
+			tail -zn1 <"$tmp" | tr -d '\0'
+			head -zn-1 < "$tmp" >"$Index"
+			rm "$tmp"
 			;;
 		clean)
 			# search for nonexistent or empty paths in index, look ahead to next
@@ -84,14 +86,16 @@ indexer(){
 					}
 					END {
 						w=1;
-						for (i in movable){
+						i=1
+						while (i in movable){
 							if (i < e){ write[w] = (empty[i]-1)/2; }
 							else write[w] = write[w-2]+1;
 							write[w+1] = array[movable[i]+1];
 							print array[movable[i]] ORS write[w];
 							w += 2;
+							i++;
 						}
-						for (i=i+1; i<e; i++) array[empty[i]] ORS array[empty[i]];
+						for (; i<e; i++) print array[empty[i]] ORS array[empty[i]];
 						print "";
 						for (i=1; i<empty[1]; i++) print array[i];
 						for (w in write) print write[w];
@@ -127,8 +131,7 @@ overbind(){
 	unset I
 	I=$(indexer get "$pathin")
 	[ "$I" ] || {
-		indexer add "$pathin"
-		I=$(indexer get "$pathin")
+		I=$(indexer add "$pathin")
 		[ "$I" ] || exit 1
 		mkdir -p "$Storage/$I/up" "$Storage/$I/wrk"
 		log added index "$I"
