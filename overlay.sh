@@ -1,23 +1,26 @@
 #!/bin/sh
 
 # todo:
-# 	make indexer free do more and run it in exiter
 # 	recursive overmounts
 # 	remove specific code. add some API to replace it
 
 # notes:
-# 	KERNEL BUG!!!!!!!!!!!!!!! it's not possible to mount overlay upperdirs on fuse in a new user namespace,
-# 		so this can't be used on fuse right now. investigating now as of committing this unseen comment...
-# 	KERNEL BUG 2!!!!!!!!!!!!! your lowerdir cannot have an odd number of double quotes in the path.
+# 	KERNEL BUG! your lowerdir (-mnt* options) cannot have an odd number of double quotes in the path.
 
-# 	socket files don't work until all prior connections are terminated
-# 	moving files from lowerdir will *copy* them, using disk space
+# 	Putting $Storage on a fuse mount will fail if it was mounted in a different user namespace.
+# 	To avoid using root, you can run `unshare -cm --keep-caps "$SHELL"` to drop into a privileged
+# 	namespace before mounting fuse, and this script should detect those needed capabilities and
+# 	keep you in the same namespace.
 
-if [ "$1" = 1 ]; then
-	shift
-else
+# 	Socket files don't work until all prior connections are terminated.
+
+# 	Without using -root, as root, in the root namespace, moving files from lowerdir will *copy* them,
+# 	using disk space, among other overlayfs downsides.
+
+[ "$1" = 1 ] && shift ||
+	[ "$(id -u)" = 0 ] ||
+	capsh --current | grep -qFi cap_sys_admin ||
 	exec unshare -cm --keep-caps -- "$0" 1 "$@"
-fi
 
 programName=${0##*/}
 
@@ -27,8 +30,8 @@ log(){
 
 mount(){
 	command mount "$@" && {
-		eval last=\$$#
-		printf '%s\0' "$last" >>"$Path/$Mountlog"
+		shift $(($# - 1))
+		printf '%s\0' "$1" >>"$Path/$Mountlog"
 	}
 }
 
@@ -130,7 +133,7 @@ overbind(){
 		mkdir -p "$Storage/$I/up" "$Storage/$I/wrk"
 		log added index "$I"
 	}
-	mount -t overlay overlay \
+	mount -t overlay overlay -o "${overopts:-userxattr}" \
 		-o "lowerdir=$(printf %s "$pathin"|sed 's/\\/\\\\/g;s/,/\\,/g;s/:/\\:/g')" \
 		-o "upperdir=$Storage/$I/up,workdir=$Storage/$I/wrk" \
 		"$Overlay/$pathout" &&
@@ -292,6 +295,9 @@ while true; do
 				mountplacer "$2"
 				shift
 			fi
+			;;
+		-root)
+			overopts=xino=auto,uuid=auto,metacopy=on
 			;;
 		-wine) # update wine and mount to lower
 			export WINEPREFIX="$global/$2"
