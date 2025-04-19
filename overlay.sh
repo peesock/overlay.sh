@@ -100,11 +100,13 @@ indexer(){
 						for (i=1; i<empty[1]; i++) print array[i];
 						for (w in write) print write[w];
 					}' >"$tmp"
-				n=$(($(grep -znm1 '^$' <"$tmp" | cut -b1) - 1))
+				n=$(($(grep -znm1 '^$' <"$tmp" | cut -d: -f1) - 1))
 				sed -zn "1,${n}p" <"$tmp" | xargs -0 sh -c '
 					while [ "$2" ]; do
-						[ -e "'"$Storage/"'$2" ] && { rm -vrf "'"$Storage/"'$2" || exit; }
-						[ "$1" != "$2" ] && { mv -vT "'"$Storage/"'$1" "'"$Storage/"'$2" || exit; }
+						in='"$Storage"'/$1
+						out='"$Storage"'/$2
+						[ -e "$out" ] && { rm -rf "$out" && printf %s\\n "removed '\''$out'\''" || exit; }
+						[ "$1" != "$2" ] && { mv -vT "$in" "$out" || exit; }
 						shift 2
 					done; [ ! "$1" ]' sh &&
 					sed -zn $((n + 2))',$p' <"$tmp" >"$Index" && rm "$tmp" ||
