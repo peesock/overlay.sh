@@ -4,6 +4,9 @@
 # 	recursive overmounts
 # 	remove specific code. add some API to replace it
 # 	allow files in $Data
+# 	allow files in storage/i
+# 	might want to store index locations based on pathout, not pathin. ponder...
+# 	ponder a config file, store mount info for a certain "instance" forever, change mounting options to config changing options. that way you can also script things like proton and wine manually without needing to store a script file for the massive command line.
 
 # notes:
 # 	utils-linux BUG! your lowerdir (-mnt* options) cannot have an odd number of double quotes in the path.
@@ -315,6 +318,41 @@ while true; do
 			mkdir -p "$STEAM_COMPAT_DATA_PATH"
 			mountplacer "$STEAM_COMPAT_DATA_PATH" proton wineboot
 			shift
+			;;
+		-convert) # converts old format fuse-overlayfs overlay.sh directories to the new fuseless format
+			i=0
+			cd -- "${2-.}" || exit
+			mkdir -vp "$Storage" "$Tree"
+			touch "$Storage/index"
+			mv -vT data "$Data"
+			for dir in "$Data"/* "$Data"/..[!$]* "$Data"/.[!.]* upper/* upper/..[!$]* upper/.[!.]*; do
+				[ -e "$dir" ] || continue
+				mkdir -vp "$Storage/$i/wrk" "$Storage/$i/up"
+				mv -vT "${dir%.dwarfs}" "$Storage/$i/up"
+				[ "${dir#"$Data"}" != "$dir" ] && printf %s\\0 $i "$dir" >> "$Index" || log "$dir" source location unknown. use "$programName -index ..." to write info.
+				i=$((i + 1))
+			done
+			rmdir mount overlay upper work/* work
+			exit
+			;;
+		-index) # helper tool for when -convert fails
+			shift
+			[ $# -le 0 ] && log usage: \
+				"$programName -index <indexfile> /path1 /path2 /path3 ..." &&
+				log paths correspond to "$Storage/[integer]/up" lowerdir location, in order starting from 0. &&
+				log if "$Storage/[integer]/up" is empty, put whatever you want and run -clean later. &&
+				exit
+			f=$1
+			shift
+			i=0
+			[ $# -gt 0 ] && for path; do
+				printf %s\\0 "$i" "$path"
+				i=$((i + 1))
+			done > "$f"
+			log showing "$f":
+			tr '\0' '\n' <"$f"
+			echo "(null bytes shown as newlines)."
+			exit
 			;;
 		--)
 			shift
