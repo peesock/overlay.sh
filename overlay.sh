@@ -142,7 +142,7 @@ overbind(){
 		log added index "$I"
 	}
 	mount -t overlay overlay -o "${overopts:-userxattr}" \
-		-o "lowerdir=$(printf %s "$pathin"|sed 's/\\/\\\\/g;s/,/\\,/g;s/:/\\:/g')" \
+		-o "lowerdir=$(printf %s "$pathin"|sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g')" \
 		-o "upperdir=$Storage/$I/up,workdir=$Storage/$I/wrk" \
 		"$Overlay/$pathout" &&
 		log overlay "$pathin --> $Overlay/$pathout" &&
@@ -325,14 +325,15 @@ while true; do
 			mkdir -vp "$Storage" "$Tree"
 			touch "$Storage/index"
 			mv -vT data "$Data"
-			for dir in "$Data"/* "$Data"/..[!$]* "$Data"/.[!.]* upper/* upper/..[!$]* upper/.[!.]*; do
+			for dir in upper/* upper/..[!$]* upper/.[!.]*; do
 				[ -e "$dir" ] || continue
 				mkdir -vp "$Storage/$i/wrk" "$Storage/$i/up"
-				mv -vT "${dir%.dwarfs}" "$Storage/$i/up"
-				[ "${dir#"$Data"}" != "$dir" ] && printf %s\\0 $i "$dir" >> "$Index" || log "$dir" source location unknown. use "$programName -index ..." to write info.
+				mv -vT "$dir" "$Storage/$i/up"
+				printf %s\\0 $i "$dir" >> "$Index"
 				i=$((i + 1))
 			done
-			rmdir mount overlay upper work/* work
+			rmdir -v mount overlay upper work/* work
+			log use "$programName -index ..." to say where these new folders come from.
 			exit
 			;;
 		-index) # helper tool for when -convert fails
