@@ -1,13 +1,9 @@
 #!/bin/sh
-set -x
 
 # todo:
-# 	recursive overmounts
-# 	remove specific code. add some API to replace it
-# 	allow files in $Data
-# 	allow files in storage/i
-# 	might want to store index locations based on pathout, not pathin. ponder...
-# 	ponder a config file, store mount info for a certain "instance" forever, change mounting options to config changing options. that way you can also script things like proton and wine manually without needing to store a script file for the massive command line.
+# 	recursive mounts
+# 	more constrained option checking, put checking inside parser
+# 	relative needs to be set before place options... the flag parser stinks
 
 # notes:
 # 	utils-linux BUG! your lowerdir (-mnt* options) cannot have an odd number of double quotes in the path.
@@ -40,7 +36,7 @@ mount(){
 	}
 }
 
-# writeIndex and getIndex take one file and then pairs of arguments, $2 = label, $3 = data, and repeat.
+# writeIndex and getIndex take one dir and then pairs of arguments, $2 = label, $3 = data, and repeat.
 # this format is used to identify each index.
 writeIndex(){
 	i=$1
@@ -83,7 +79,7 @@ parseId(){
 	# if there are missing keys, do not output anything.
 	# in the future, have awk validate as well as parse.
 	keylist=$(printf '%s,' "$@")
-	keylist=${keylist%?}
+	keylist=${keylist%,}
 	awk '
 	BEGIN {
 		RS="\0\n"; ORS="\0"; set="";
@@ -139,47 +135,35 @@ commadd(){
 	eval "$v=\$$v"'"$(escapist "$@");"'
 }
 
-# log beginning antics
-# set -x
-# "$@"
-# exit
-
 # $1 is the input path, remains as-is
 # $2 is the output, relative to overlay
 # `overbind /home/balls /buh/muh` mounts /home/balls to $Overlay/buh/muh.
 placer(){
 	s=0
-	dir=$1
-	source=$2
-	sink=$3
-	shift 3
-	if [ -d "$source" ]; then
-		mkdir -p "$Upper/$sink" "$Lower/$sink"
-	# else # does not work
-	# 	[ "${pathout%/*}" != "$pathout" ] &&
-	# 		mkdir -p "$Upper/${pathout%/*}" "$Lower/${pathout%/*}"
-	# 	touch "$Upper/$pathout" "$Lower/$pathout"
-	fi
+	source=$1
+	sink=$2
+	shift 2
+	mkdir -p "$Upper/$sink" "$Lower/$sink"
 	unset I
-	I=$(getIndex "$dir" "$@")
+	I=$(getIndex "$Storage" "$@")
 	[ "$I" ] || {
-		I=$(getNextIndex "$dir")
+		I=$(getNextIndex "$Storage")
 		writeIndex "$I" "$@"
 	}
+	lowerdir=$(printf %s "$source" | sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g'; echo x)
+	lowerdir=${lowerdir%x}
 	mount -t overlay overlay -o "${overopts:-userxattr}" \
-		-o "lowerdir=$(printf %s "$source"|sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g')" \
+		-o "lowerdir=$lowerdir" \
 		-o "upperdir=$I/data,workdir=$I/work" \
-		"$sink" &&
-		log overlay "$source --> $Overlay/$sink" # &&
-	# 	[ "$sink" ] && { # logic note
-	# 	[ "$source" != "$Lower/$sink" ] && {
-	# 		mount -o bind,ro -- "$source" "$Lower/$sink" &&
-	# 			log bound "$source --> $Lower/$sink" || s=1
-	# 	}
-	# 	mount -o bind -- "$I/data" "$Upper/$sink" &&
-	# 		log bound "$I/data --> $Upper/$sink" || s=1
-	# } || s=1
-	# return $s
+		"$Relative$sink" && log overlayed "$source --> $sink" && {
+			[ "$source" != "$Lower/$sink" ] && {
+				mount -o bind,ro -- "$source" "$Lower/$sink" &&
+					log bound "$source --> $Lower/$sink" || s=1
+			}
+		}
+		mount -o bind -- "$I/data" "$Upper/$sink" &&
+			log bound "$I/data --> $Upper/$sink" || s=1
+	return $s
 }
 
 exiter(){
@@ -196,49 +180,82 @@ placerOptsParse()(
 	echo "$opts" | grep -qF o && printf %s\\0 sink "$sink"
 )
 
-Tree=tree
-Storage=storage
-Overlay=$Tree/overlay
-Upper=$Tree/upper
-Lower=$Tree/lower
-Mountlog=$Storage/mountlog
-export XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
-global=$XDG_DATA_HOME/$programName
+makeStorageCwd(){
+	cwd=$(realpath "$PWD")
+	out="$1/by-cwd/$(printf %s "$cwd" | sha256sum | awk '{print $1}')"
+	printf %s "$cwd" >"$out"/name
+	printf %s "$out"
+}
+
+makeDir(){
+	dir=$1
+	[ -e "$dir" ] && [ ! -d "$dir" ] && log "'$dir' isn't a directory." && return 1
+	mkdir -p "$dir"
+}
+
+fullpath(){
+	realpath -msz "$1" | tr -d '\0'; printf /
+}
+
+XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
 
 while true; do
 	case $1 in
-		-d|-dedupe) # compare lowerdirs with corresponding overlay dirs and remove dupes
+		-d|-dedupe)
 			dedupe=true
 			;;
-		-i|-interactive) # prompt before deleting
+		-i|-interactive)
 			interactive=true
 			;;
 		-relative)
-			[ -e "$2" ] && [ ! -d "$2" ] && log Bad relative dir && exit 1
-			mkdir -p "$2"
-			Relative=$2
+			makeDir "$2" || exit
+			Relative=$(fullpath "$2")
+			shift
+			;;
+		-tree)
+			makeDir "$2" || exit
+			Tree=$2
+			shift
+			;;
+		-global)
+			makeDir "$2" || exit
+			GlobalStorage=$2
+			shift
+			;;
+		-id)
+			Storage="$GlobalStorage/by-name/$2"
+			shift
+			;;
+		-storage)
+			makeDir "$2" || exit
+			Storage=$2
 			shift
 			;;
 		-opts)
-			true # default opts for all placements
+			Opts=$2
+			shift
 			;;
 		-place*|-replace*)
 			opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
+			source=$(fullpath "$2")
 			case $1 in
 				-place*)
-					source=$2
-					sink=$3
+					if [ "$Relative" ]; then
+						sink=$3
+					else
+						sink=$(fullpath "$3")
+					fi
 					opts=${opts:-"o"} # default
-					shift 2
-					;;
-				-replace*)
-					source=$2
-					sink=$source
-					opts=${opts:-"io"} # default
 					shift
 					;;
+				-replace*)
+					sink=$source
+					opts=${opts:-"io"} # default
+					;;
 			esac
-			eval 'commadd arr1 placer "$Storage" "$source" "$sink"' "$(placerOptsParse "$opts" "$source" "$sink" | escapist)"
+			[ "$Relative" ] && sink=${sink#/}
+			eval 'commadd arr1 placer "$source" "$sink"' "$(placerOptsParse "$opts" "$source" "$sink" | escapist)"
+			shift
 			;;
 		-root)
 			overopts=xino=auto,uuid=auto,metacopy=on
@@ -252,21 +269,28 @@ while true; do
 	shift
 done
 
+GlobalStorage=${GlobalStorage:-"${GLOBAL:-"$XDG_DATA_HOME/$programName"}"}
+Storage=${Storage:-"$(makeStorageCwd "$GlobalStorage")"}
+Tree=${Tree:-"$Storage/tree"}
+mkdir -p "$Storage" "$Tree"
+Mountlog=$Storage/mountlog
+Upper=$Tree/upper
+Lower=$Tree/lower
+
 grep -zq . "$Mountlog" 2>/dev/null && {
-	log "$Path/$Mountlog" is not empty, indicating bad unmounting. Investigate and/or remove the file.
+	log "$Mountlog" is not empty, indicating bad unmounting. Investigate and remove the file.
 	exit 1
 }
 
 trap exiter EXIT
-# command mount -t tmpfs tmpfs "$Tree"
-# command mount --make-rslave "$Tree"
-# mkdir "$Lower" "$Upper" "$Overlay"
-#
-# overbind "$Lower"
+command mount -t tmpfs tmpfs "$Tree"
+command mount --make-rslave "$Tree"
+mkdir "$Lower" "$Upper"
 
+[ "$Relative" ] && {
+	placer "$Lower/" "" relative true
+}
 eval "$arr1"
-# commands that need to run after mounting
-# eval "$arr2"
 
 trap 'log INT recieved' INT # TODO: signal handling
 if [ $# -ge 1 ]; then
@@ -282,71 +306,76 @@ echo
 log exiting...
 trap - INT
 
-# [ "$dedupe" ] && {
-# 	tmp=$(mktemp)
-# 	for low in "$Lower"/* "$Lower"/..[!$]* "$Lower"/.[!.]*; do
-# 		[ -e "$low" ] || continue
-# 		up="$Upper/${low##*/}"
-# 		# [ -e "$up" ] || continue
-# 		log looking for duplicates in "$up"
-# 		find "$up" -depth -type f -print0 |
-# 			cut -zb "$(printf %s "$Upper/" | wc -c)"- |
-# 			awk -v "upper=$Upper" -v "lower=$Lower" '
-# 				BEGIN{ RS="\0"; ORS="\0" }
-# 				{ print upper $0 "\0" lower $0 }' |
-# 			unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
-# 				until [ $# -le 0 ]; do
-# 					[ -e "$2" ] &&
-# 						(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
-# 					shift 2
-# 				done
-# 				wait
-# 			' sh | tee "$tmp" | tr '\0' '\n'
-# 			# unshare creates a new pid namespace so that pid collisions are impossible
-# 		grep -qz . <"$tmp" && {
-# 			[ "$interactive" ] && {
-# 				printf "delete these files? y/N: "
-# 				read -r line
-# 			} || line=y
-# 			case $line in y|Y)
-# 				xargs -0 rm -- <"$tmp"
-# 				# todo: better rmdir
-# 				xargs -0 dirname -z -- <"$tmp" | uniq -z | xargs -0 rmdir -p --ignore-fail-on-non-empty -- 2>/dev/null
-# 				log removed duplicates
-# 				;;
-# 			esac
-# 		}
-# 	done
-# 	rm "$tmp"
-# }
-#
-# {
-# 	n=$(tr -cd '\0' <"$Mountlog" | wc -c)
-# 	[ "$n" ] || return
-# 	for i in $(seq 1 "$n" | tac); do
-# 		line=$(sed -zn "$i"p <"$Mountlog")
-# 		umount -vr -- "$line"
-# 	done
-# }
-# until err=$(umount "$Overlay" 2>&1) && log unmounted overlayfs; do
-# 	pidlist=$(fuser -Mm "$Overlay" 2>/dev/null) || {
-# 		mountpoint -q "$Overlay" || break
-# 		# if there are no processes but overlay is still mounted, lazy umount
-# 		umount -l "$Overlay"
-# 		log lazily unmounted overlayfs
-# 		break
-# 	}
-# 	if [ "$pidlist" != "$prevlist" ]; then
-# 		echo "$err"
-# 		# ps -p "$(echo "$pidlist" | sed 's/\s\+/,/g; s/^,\+//')"
-# 		fuser -vmM "$Overlay"
-# 		change=1
-# 	elif [ "$change" -eq 1 ]; then
-# 		log waiting...
-# 		change=0
-# 	fi
-# 	prevlist=$pidlist
-#
-# 	sleep 1
-# done
-# umount -vl "$Tree"
+[ "$dedupe" ] && {
+	tmp=$(mktemp)
+	for low in "$Lower"/* "$Lower"/..[!$]* "$Lower"/.[!.]*; do
+		[ -e "$low" ] || continue
+		up="$Upper/${low##*/}"
+		# [ -e "$up" ] || continue
+		log looking for duplicates in "$up"
+		find "$up" -depth -type f -print0 |
+			cut -zb "$(printf %s "$Upper/" | wc -c)"- |
+			awk -v "upper=$Upper" -v "lower=$Lower" '
+				BEGIN{ RS="\0"; ORS="\0" }
+				{ print upper $0 "\0" lower $0 }' |
+			unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
+				until [ $# -le 0 ]; do
+					[ -e "$2" ] &&
+						(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
+					shift 2
+				done
+				wait
+			' sh | tee "$tmp" | tr '\0' '\n'
+			# unshare creates a new pid namespace so that pid collisions are impossible
+		grep -qz . <"$tmp" && {
+			[ "$interactive" ] && {
+				printf "delete these files? y/N: "
+				read -r line
+			} || line=y
+			case $line in y|Y)
+				xargs -0 rm -- <"$tmp"
+				# todo: better rmdir
+				xargs -0 dirname -z -- <"$tmp" | uniq -z | xargs -0 rmdir -p --ignore-fail-on-non-empty -- 2>/dev/null
+				log removed duplicates
+				;;
+			esac
+		}
+	done
+	rm "$tmp"
+}
+
+superUmount(){
+mnt=$1
+	until err=$(umount -vr -- "$mnt" 2>&1) && printf %s\\n "$err"; do
+		pidlist=$(fuser -Mm "$mnt" 2>/dev/null) || {
+			mountpoint -q "$mnt" || break
+			# if there are no processes but point is still mounted, lazy umount
+			umount -l "$mnt"
+			log lazily unmounted "'$mnt'"
+			break
+		}
+		if [ "$pidlist" != "$prevlist" ]; then
+			echo "$err"
+			# ps -p "$(echo "$pidlist" | sed 's/\s\+/,/g; s/^,\+//')"
+			fuser -vmM "$mnt"
+			change=1
+		elif [ "$change" -eq 1 ]; then
+			log waiting...
+			change=0
+		fi
+		prevlist=$pidlist
+	
+		sleep 1
+	done
+}
+
+{
+	n=$(tr -cd '\0' <"$Mountlog" | wc -c)
+	[ "$n" ] || return
+	for i in $(seq 1 "$n" | tac); do
+		line=$(sed -zn "$i"p <"$Mountlog"; echo x)
+		superUmount "${line%x}"
+	done
+}
+
+umount -vl "$Tree"
