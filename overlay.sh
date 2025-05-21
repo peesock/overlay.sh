@@ -3,7 +3,6 @@
 # todo:
 # 	recursive mounts
 # 	more constrained option checking, put checking inside parser
-# 	relative needs to be set before place options... the flag parser stinks
 
 # notes:
 # 	utils-linux BUG! your lowerdir (-mnt* options) cannot have an odd number of double quotes in the path.
@@ -36,7 +35,7 @@ mount(){
 	}
 }
 
-# writeIndex and getIndex take one dir and then pairs of arguments, $2 = label, $3 = data, and repeat.
+# writeIndex and getIndex take one dir and then pairs of arguments, $2 = key, $3 = value, and repeat.
 # this format is used to identify each index.
 writeIndex(){
 	i=$1
@@ -44,6 +43,12 @@ writeIndex(){
 	mkdir -p "$i"/data "$i"/work
 	writeId "$i/id" "$@"
 	log added "$i"
+}
+
+writeId(){
+	id=$1
+	shift
+	printf '%s\0\n' "$@" > "$id"
 }
 
 getIndex(){
@@ -64,12 +69,6 @@ getIndex(){
 		break
 	done)
 	printf %s "$winner"
-}
-
-writeId(){
-	id=$1
-	shift
-	printf '%s\0\n' "$@" > "$id"
 }
 
 parseId(){
@@ -124,20 +123,22 @@ getAllIndexes(){
 	find "$1" -maxdepth 1 -mindepth 1 -type d -regex '.*/[0-9]+'
 }
 
-escapist(){ # to store arrays as escaped single quoted arguments
+# store arrays as escaped single quoted arguments
+escapist(){
 	if [ $# -eq 0 ]; then cat; else printf "%s\0" "$@"; fi |
 		sed -z 's/'\''/'\''\\'\'\''/g; s/\(.*\)/'\''\1'\''/g' | tr '\0' ' '
 }
 
+# store arguments as a command inside an eval-able variable named $1
 commadd(){
 	v=$1
 	shift
 	eval "$v=\$$v"'"$(escapist "$@");"'
 }
 
-# $1 is the input path, remains as-is
-# $2 is the output, relative to overlay
-# `overbind /home/balls /buh/muh` mounts /home/balls to $Overlay/buh/muh.
+# takes source, sink, then key-value pairs.
+# if the pairs show a match, mount with the existing index.
+# otherwise, make a new index with those pairs.
 placer(){
 	s=0
 	source=$1
@@ -155,7 +156,7 @@ placer(){
 	mount -t overlay overlay -o "${overopts:-userxattr}" \
 		-o "lowerdir=$lowerdir" \
 		-o "upperdir=$I/data,workdir=$I/work" \
-		"$Relative$sink" && log overlayed "$source --> $sink" && {
+		"$Overlay$sink" && log overlayed "$source --> $Overlay$sink" && {
 			[ "$source" != "$Lower/$sink" ] && {
 				mount -o bind,ro -- "$source" "$Lower/$sink" &&
 					log bound "$source --> $Lower/$sink" || s=1
@@ -181,7 +182,7 @@ placerOptsParse()(
 )
 
 makeStorageCwd(){
-	cwd=$(realpath "$PWD")
+	cwd=$(realpath .)
 	out="$1/by-cwd/$(printf %s "$cwd" | sha256sum | awk '{print $1}')"
 	printf %s "$cwd" >"$out"/name
 	printf %s "$out"
@@ -194,10 +195,30 @@ makeDir(){
 }
 
 fullpath(){
-	realpath -msz "$1" | tr -d '\0'; printf /
+	realpath -msz --relative-base=. -- "$1" | tr -d '\0'; printf /
 }
 
-XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
+place(){
+	opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
+	source=$(fullpath "$2")
+	case $# in
+		3) # place
+			if [ "$Overlay" ]; then
+				sink=$3
+			else
+				sink=$(fullpath "$3")
+			fi
+			opts=${opts:-"o"} # default
+			shift
+			;;
+		2) # replace
+			sink=$source
+			opts=${opts:-"io"} # default
+			;;
+	esac
+	[ "$Overlay" ] && sink=${sink#/}
+	eval 'placer "$source" "$sink"' "$(placerOptsParse "$opts" "$source" "$sink" | escapist)"
+}
 
 while true; do
 	case $1 in
@@ -207,9 +228,9 @@ while true; do
 		-i|-interactive)
 			interactive=true
 			;;
-		-relative)
+		-overlay)
 			makeDir "$2" || exit
-			Relative=$(fullpath "$2")
+			Overlay=$(fullpath "$2")
 			shift
 			;;
 		-tree)
@@ -235,26 +256,12 @@ while true; do
 			Opts=$2
 			shift
 			;;
-		-place*|-replace*)
-			opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
-			source=$(fullpath "$2")
-			case $1 in
-				-place*)
-					if [ "$Relative" ]; then
-						sink=$3
-					else
-						sink=$(fullpath "$3")
-					fi
-					opts=${opts:-"o"} # default
-					shift
-					;;
-				-replace*)
-					sink=$source
-					opts=${opts:-"io"} # default
-					;;
-			esac
-			[ "$Relative" ] && sink=${sink#/}
-			eval 'commadd arr1 placer "$source" "$sink"' "$(placerOptsParse "$opts" "$source" "$sink" | escapist)"
+		-place*)
+			commadd arr1 place "$1" "$2"
+			shift 2
+			;;
+		-replace*)
+			commadd arr1 place "$1" "$2" "$3"
 			shift
 			;;
 		-root)
@@ -269,6 +276,7 @@ while true; do
 	shift
 done
 
+XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
 GlobalStorage=${GlobalStorage:-"${GLOBAL:-"$XDG_DATA_HOME/$programName"}"}
 Storage=${Storage:-"$(makeStorageCwd "$GlobalStorage")"}
 Tree=${Tree:-"$Storage/tree"}
@@ -287,9 +295,10 @@ command mount -t tmpfs tmpfs "$Tree"
 command mount --make-rslave "$Tree"
 mkdir "$Lower" "$Upper"
 
-[ "$Relative" ] && {
+[ "$Overlay" ] && {
 	placer "$Lower/" "" relative true
 }
+
 eval "$arr1"
 
 trap 'log INT recieved' INT # TODO: signal handling
@@ -370,7 +379,7 @@ mnt=$1
 }
 
 {
-	n=$(tr -cd '\0' <"$Mountlog" | wc -c)
+	n=$(tr -cd '\0' <"$Mountlog" | wc -c) 2>/dev/null
 	[ "$n" ] || return
 	for i in $(seq 1 "$n" | tac); do
 		line=$(sed -zn "$i"p <"$Mountlog"; echo x)
