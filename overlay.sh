@@ -2,20 +2,20 @@
 
 # todo:
 # 	recursive mounts
-# 	more constrained option checking, put checking inside parser
+# 	special keys like "uuid", or custom ones
 
 # notes:
-# 	utils-linux BUG! your lowerdir (-mnt* options) cannot have an odd number of double quotes in the path.
+# 	utils-linux BUG! your source dir cannot have an odd number of double quotes in the path.
 
-# 	Putting $Storage on a fuse mount will fail if it was mounted in a different user namespace.
-# 	To avoid using root, you can run `unshare -cm --keep-caps "$SHELL"` to drop into a privileged
-# 	namespace before mounting fuse, and this script should detect those needed capabilities and
-# 	keep you in the same namespace.
+# 	Without using -root, as root, in the root namespace, moving files from lowerdir will *copy*
+# 	them, using disk space, among other overlayfs downsides.
+
+# 	Putting Storage on a fuse mount will fail if it was mounted in a different user namespace. To
+# 	avoid using root, you can run `unshare -cm --keep-caps "$SHELL"` to drop into a privileged
+# 	namespace before mounting fuse, and this script will detect those capabilities and keep you in
+# 	the same namespace.
 
 # 	Socket files don't work until all prior connections are terminated.
-
-# 	Without using -root, as root, in the root namespace, moving files from lowerdir will *copy* them,
-# 	using disk space, among other overlayfs downsides.
 
 [ "$1" = 1 ] && shift ||
 	[ "$(id -u)" = 0 ] ||
@@ -55,58 +55,49 @@ getIndex(){
 	[ $# -le 1 ] && exit
 	dir=$1
 	shift
-	unset winner
-	args=$(escapist "$@")
-	winner=$(getAllIndexes "$dir" | while read -r index; do
-		eval set -- "$args"
-		while [ $# -gt 0 ]; do
-			value=''
-			value=$(parseId "$index/id" "$1"; echo x)
-			[ "$value" = "$2"x ] || continue 2
-			shift 2
-		done
-		printf %s "$index"
-		break
-	done)
-	printf %s "$winner"
+	getAllIndexes "$dir" | while read -r index; do
+		parseId "$index/id" "$@" && printf %s "$index" && return
+	done
 }
 
 parseId(){
 	id=$1
 	shift
-	# for keys, awk will spit out \0 delimited values.
-	# if there are missing keys, do not output anything.
-	# in the future, have awk validate as well as parse.
-	keylist=$(printf '%s,' "$@")
-	keylist=${keylist%,}
-	awk '
-	BEGIN {
-		RS="\0\n"; ORS="\0"; set="";
-		split("'"$keylist"'", keylist, ",");
-		for (key in keylist)
-			map[keylist[key]] = "";
-	}
+	# returns 1 if an exact match isn't found
+	(printf '%s\0\n' "$@"; cat "$id") | awk '
+	BEGIN { RS="\0\n"; ORS="\0"; hit=0; begin=1; }
 	{
-		if (NR % 2 == 1){
-			for (key in keylist)
-				if (keylist[key] == $0){
-					set = keylist[key];
+		if (begin){
+			if (NR % 2 == 1){
+				k=$0;
+			} else {
+				map[k] = $0;
+				if (NR == '"$#"'){
+					begin=0;
+					NR=0;
+				}
+			}
+		} else if (NR % 2 == 1){
+				k=$0;
+		} else {
+			for (key in map){
+				if (k == key){
+					if ($0 != map[k]){
+						exit 1; # if any key check fails
+					}
+					hit=1;
 					break;
 				}
-		} else {
-			if (set != ""){
-				map[set] = $0;
-				set = "";
 			}
+			if (!hit){
+				exit 1; # if any key does not exist
+			}
+			hit=0
 		}
 	}
-	END {
-		for (key in map)
-			if (map[key] == "") exit;
-		for (key in map)
-			print map[key];
-	}
-	' < "$id"
+	END { if (NR != '"$#"') exit 1; }
+	'
+	return $?
 }
 
 # $1 = storage location
@@ -203,11 +194,7 @@ place(){
 	source=$(fullpath "$2")
 	case $# in
 		3) # place
-			if [ "$Overlay" ]; then
-				sink=$3
-			else
-				sink=$(fullpath "$3")
-			fi
+			sink=$(fullpath "$3")
 			opts=${opts:-"o"} # default
 			shift
 			;;
