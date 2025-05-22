@@ -37,14 +37,14 @@ mount(){
 	}
 }
 
-# writeIndex and getIndex take one dir and then pairs of arguments, $2 = key, $3 = value, and repeat.
+# makeIndex and getIndex take storage dir and then pairs of arguments, $2 = key, $3 = value, and repeat.
 # this format is used to identify each index.
-writeIndex(){
+makeIndex(){
 	i=$1
 	shift
 	mkdir -p "$i"/data "$i"/work
 	writeId "$i/id" "$@"
-	log added "$i"
+	log added index: "$i"
 }
 
 writeId(){
@@ -102,8 +102,8 @@ parseId(){
 	return $?
 }
 
-# $1 = storage location
-# returns a number, that doesn't exist yet
+# takes storage location
+# returns a path that doesn't exist yet
 getNextIndex(){
 	printf %s "$1/"
 	getAllIndexes "$1" | awk '
@@ -142,7 +142,7 @@ placer(){
 	I=$(getIndex "$Storage" "$@")
 	[ "$I" ] || {
 		I=$(getNextIndex "$Storage")
-		writeIndex "$I" "$@"
+		makeIndex "$I" "$@"
 	}
 	lowerdir=$(printf %s "$source" | sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g'; echo x)
 	lowerdir=${lowerdir%x}
@@ -152,11 +152,11 @@ placer(){
 		"$Overlay$sink" && log overlayed "$source --> $Overlay$sink" && {
 			[ "$source" != "$Lower/$sink" ] && {
 				mount -o bind,ro -- "$source" "$Lower/$sink" &&
-					log bound "$source --> $Lower/$sink" || s=1
+					log bound "$source --> $Lower/${sink#/}" || s=1
 			}
 		}
 		mount -o bind -- "$I/data" "$Upper/$sink" &&
-			log bound "$I/data --> $Upper/$sink" || s=1
+			log bound "$I/data --> $Upper/${sink#/}" || s=1
 	return $s
 }
 
@@ -164,20 +164,12 @@ exiter(){
 	[ -e "$Mountlog" ] && rm "$Mountlog"
 }
 
-# takes opts, then source, then sink
-# outputs \0 delimited key-value pairs
-placerOptsParse()(
-	opts=$1
-	source=$2
-	sink=$3
-	echo "$opts" | grep -qF i && printf %s\\0 source "$source"
-	echo "$opts" | grep -qF o && printf %s\\0 sink "$sink"
-)
-
 makeStorageCwd(){
-	cwd=$(realpath .)
-	out="$1/by-cwd/$(printf %s "$cwd" | sha256sum | awk '{print $1}')"
-	makeDir "$out"
+	cwd=$(realpath -z .; echo x)
+	cwd=${cwd%x}
+	# base64 of a hash but / is replaced with _
+	out="$1/by-cwd/$(printf %s "$cwd" | openssl dgst -sha1 -binary | openssl enc -base64 | tr / _)"
+	makeDir "$out" || exit
 	printf %s "$cwd" >"$out"/name
 	printf %s "$out"
 }
@@ -189,15 +181,42 @@ makeDir(){
 }
 
 fullpath(){
-	realpath -msz --relative-base=. -- "$1" | tr -d '\0'; printf /
+	case $1 in
+		full)
+			args='-msz'
+			;;
+		sym)
+			args='-mz'
+			;;
+		relative)
+			args='-msz --relative-base=.'
+			;;
+
+	esac
+	realpath $args -- "$2" | tr -d \\0
+	printf /
 }
+
+# takes opts, then source, then sink
+# outputs \0 delimited key-value pairs
+placeOptsParse()(
+	opts=$1
+	source=$(fullpath full "$2")
+	if [ "$Overlay" ]; then
+		sink=$(fullpath relative "$3")
+	else
+		sink=$(fullpath full "$3")
+	fi
+	echo "$opts" | grep -qF i && printf %s\\0 source "$source"
+	echo "$opts" | grep -qF o && printf %s\\0 sink "$sink"
+)
 
 place(){
 	opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
-	source=$(fullpath "$2")
+	source=$2
 	case $# in
 		3) # place
-			sink=$(fullpath "$3")
+			sink=$3
 			opts=${opts:-"o"} # default
 			shift
 			;;
@@ -207,7 +226,9 @@ place(){
 			;;
 	esac
 	[ "$Overlay" ] && sink=${sink#/}
-	eval 'placer "$source" "$sink"' "$(placerOptsParse "$opts" "$source" "$sink" | escapist)"
+	Keys=${Keys:-"$(placeOptsParse "$opts" "$source" "$sink" | escapist)"}
+	eval 'placer "$source" "$sink"' "$Keys"
+	Keys=''
 }
 
 while true; do
@@ -219,28 +240,31 @@ while true; do
 			interactive=true
 			;;
 		-overlay)
-			makeDir "$2" || exit
-			Overlay=$(fullpath "$2")
+			Overlay=$(fullpath sym "$2")
+			makeDir "$Overlay" || exit
 			shift
 			;;
 		-tree)
-			makeDir "$2" || exit
-			Tree=$2
+			Tree=$(fullpath sym "$2")
+			Tree=${Tree%/}
 			shift
 			;;
 		-global)
-			makeDir "$2" || exit
-			GlobalStorage=$2
-			shift
-			;;
-		-id)
-			Storage="$GlobalStorage/by-name/$2"
+			Global=$(fullpath sym "$2")
+			makeDir "$Global" || exit
 			shift
 			;;
 		-storage)
-			makeDir "$2" || exit
-			Storage=$2
+			Storage=$(fullpath sym "$2")
 			shift
+			;;
+		-id)
+			Storage="$Global/by-name/$2"
+			shift
+			;;
+		-key)
+			Keys=$Keys$(escapist "$2" "$3")
+			shift 2
 			;;
 		-opts)
 			Opts=$2
@@ -267,8 +291,8 @@ while true; do
 done
 
 XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
-GlobalStorage=${GlobalStorage:-"${GLOBAL:-"$XDG_DATA_HOME/$programName"}"}
-Storage=${Storage:-"$(makeStorageCwd "$GlobalStorage")"}
+Global=${Global:-"${GLOBAL:-"$XDG_DATA_HOME/$programName"}"}
+Storage=${Storage:-"$(makeStorageCwd "$Global")"}
 Tree=${Tree:-"$Storage/tree"}
 mkdir -p "$Storage" "$Tree"
 Mountlog=$Storage/mountlog
@@ -306,7 +330,7 @@ log exiting...
 trap - INT
 
 dedupeFind(){
-	find "$up" -mindepth 1 -depth "$@" -print0 |
+	find "$Upper" -mindepth 1 -depth "$@" -print0 |
 		(printf %s\\0 "$Tree"; cut -zb "$(printf %s "$Upper/" | wc -c)"-) |
 		awk -v "upper=${Upper##*/}" -v "lower=${Lower##*/}" '
 			BEGIN { RS="\0"; ORS="\0" }
@@ -319,37 +343,33 @@ dedupeFind(){
 
 [ "$dedupe" ] && {
 	tmp=$(mktemp)
-	for low in "$Lower"/* "$Lower"/..[!$]* "$Lower"/.[!.]*; do
-		[ -e "$low" ] || continue
-		up="$Upper/${low##*/}" # repeat process for every top-level dir
-		log looking for duplicates in "$up"
-		# unshare creates a new pid namespace so that pid collisions are impossible
-		dedupeFind -type f | unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
-				until [ $# -le 0 ]; do
-					(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
-					shift 2
-				done
-				wait
-			' sh | tee "$tmp" | tr '\0' '\n'
-		grep -qz . <"$tmp" && {
-			[ "$interactive" ] && {
-				printf "delete these files? y/N: "
-				read -r line
-			} || line=y
-			case $line in y|Y)
-				xargs -0 rm -- <"$tmp"
-				dedupeFind -type d | awk 'BEGIN{RS="\0"; ORS="\0";} {if (NR % 2 == 1) print $0;}' |
-				xargs -0 rmdir --ignore-fail-on-non-empty --
-				log removed duplicates
-				;;
-			esac
-		}
-	done
+	log looking for duplicates in "$Upper"
+	# unshare creates a new pid namespace so that pid collisions are impossible
+	dedupeFind -type f | unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
+			until [ $# -le 0 ]; do
+				(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
+				shift 2
+			done
+			wait
+		' sh | tee "$tmp" | tr '\0' '\n'
+	grep -qz . <"$tmp" && {
+		[ "$interactive" ] && {
+			printf "delete these files? y/N: "
+			read -r line
+		} || line=y
+		case $line in y|Y)
+			xargs -0 rm -- <"$tmp"
+			dedupeFind -type d | awk 'BEGIN{RS="\0"; ORS="\0";} {if (NR % 2 == 1) print $0;}' |
+			xargs -0 rmdir --ignore-fail-on-non-empty --
+			log removed duplicates
+			;;
+		esac
+	}
 	rm "$tmp"
 }
 
 superUmount(){
-mnt=$1
+	mnt=$1
 	until err=$(umount -vr -- "$mnt" 2>&1) && printf %s\\n "$err"; do
 		pidlist=$(fuser -Mm "$mnt" 2>/dev/null) || {
 			mountpoint -q "$mnt" || break
