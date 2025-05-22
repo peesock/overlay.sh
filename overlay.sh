@@ -4,6 +4,7 @@
 # 	recursive mounts
 # 	special keys like "uuid", or custom ones
 # 	allow mixing of -overlay and not
+# 	dedupe things besides files and dirs (symlinks, sockets...)
 
 # notes:
 # 	utils-linux BUG! your source dir cannot have an odd number of double quotes in the path.
@@ -304,27 +305,32 @@ echo
 log exiting...
 trap - INT
 
+dedupeFind(){
+	find "$up" -mindepth 1 -depth "$@" -print0 |
+		(printf %s\\0 "$Tree"; cut -zb "$(printf %s "$Upper/" | wc -c)"-) |
+		awk -v "upper=${Upper##*/}" -v "lower=${Lower##*/}" '
+			BEGIN { RS="\0"; ORS="\0" }
+			{
+				if (NR == 1) tree = $0;
+				else print tree "/" upper $0 ORS tree "/" lower $0
+			}
+		'
+}
+
 [ "$dedupe" ] && {
 	tmp=$(mktemp)
 	for low in "$Lower"/* "$Lower"/..[!$]* "$Lower"/.[!.]*; do
 		[ -e "$low" ] || continue
-		up="$Upper/${low##*/}"
-		# [ -e "$up" ] || continue
+		up="$Upper/${low##*/}" # repeat process for every top-level dir
 		log looking for duplicates in "$up"
-		find "$up" -depth -type f -print0 |
-			cut -zb "$(printf %s "$Upper/" | wc -c)"- |
-			awk -v "upper=$Upper" -v "lower=$Lower" '
-				BEGIN{ RS="\0"; ORS="\0" }
-				{ print upper $0 "\0" lower $0 }' |
-			unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
+		# unshare creates a new pid namespace so that pid collisions are impossible
+		dedupeFind -type f | unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
 				until [ $# -le 0 ]; do
-					[ -e "$2" ] &&
-						(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
+					(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
 					shift 2
 				done
 				wait
 			' sh | tee "$tmp" | tr '\0' '\n'
-			# unshare creates a new pid namespace so that pid collisions are impossible
 		grep -qz . <"$tmp" && {
 			[ "$interactive" ] && {
 				printf "delete these files? y/N: "
@@ -332,8 +338,8 @@ trap - INT
 			} || line=y
 			case $line in y|Y)
 				xargs -0 rm -- <"$tmp"
-				# todo: better rmdir
-				xargs -0 dirname -z -- <"$tmp" | uniq -z | xargs -0 rmdir -p --ignore-fail-on-non-empty -- 2>/dev/null
+				dedupeFind -type d | awk 'BEGIN{RS="\0"; ORS="\0";} {if (NR % 2 == 1) print $0;}' |
+				xargs -0 rmdir --ignore-fail-on-non-empty --
 				log removed duplicates
 				;;
 			esac
