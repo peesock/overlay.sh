@@ -3,6 +3,7 @@
 # todo:
 # 	recursive mounts
 # 	special keys like "uuid", or custom ones
+# 	allow mixing of -overlay and not
 
 # notes:
 # 	utils-linux BUG! your source dir cannot have an odd number of double quotes in the path.
@@ -175,6 +176,7 @@ placerOptsParse()(
 makeStorageCwd(){
 	cwd=$(realpath .)
 	out="$1/by-cwd/$(printf %s "$cwd" | sha256sum | awk '{print $1}')"
+	makeDir "$out"
 	printf %s "$cwd" >"$out"/name
 	printf %s "$out"
 }
@@ -244,11 +246,11 @@ while true; do
 			shift
 			;;
 		-place*)
-			commadd arr1 place "$1" "$2"
+			commadd arr1 place "$1" "$2" "$3"
 			shift 2
 			;;
 		-replace*)
-			commadd arr1 place "$1" "$2" "$3"
+			commadd arr1 place "$1" "$2" "$2"
 			shift
 			;;
 		-root)
