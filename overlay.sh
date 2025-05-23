@@ -2,7 +2,6 @@
 
 # todo:
 # 	recursive mounts
-# 	special keys like "uuid", or custom ones
 # 	allow mixing of -overlay and not
 # 	dedupe things besides files and dirs (symlinks, sockets...)
 
@@ -137,7 +136,7 @@ placer(){
 	source=$1
 	sink=$2
 	shift 2
-	mkdir -p "$Upper/$sink" "$Lower/$sink"
+	mkdir -p "$Tree/$Upper/$sink" "$Tree/$Lower/$sink"
 	unset I
 	I=$(getIndex "$Storage" "$@")
 	[ "$I" ] || {
@@ -147,10 +146,10 @@ placer(){
 	lowerdir=$(printf %s "$source" | sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g'; echo x)
 	lowerdir=${lowerdir%x}
 
-	[ "$source" != "$Lower/$sink" ] && {
-		mount -o bind,ro -- "$source" "$Lower/$sink" &&
+	[ "$source" != "$Tree/$Lower/$sink" ] && {
+		mount -o bind,ro -- "$source" "$Tree/$Lower/$sink" &&
 			log bound "$source --> $Lower/${sink#/}" || s=1
-		mount -o bind -- "$I/data" "$Upper/$sink" &&
+		mount -o bind -- "$I/data" "$Tree/$Upper/$sink" &&
 			log bound "$I/data --> $Upper/${sink#/}" || s=1
 	}
 	mount -t overlay overlay -o "${overopts:-userxattr}" \
@@ -177,7 +176,7 @@ makeStorageCwd(){
 makeDir(){
 	dir=$1
 	[ -e "$dir" ] && [ ! -d "$dir" ] && log "'$dir' isn't a directory." && return 1
-	mkdir -p "$dir"
+	mkdir -pv "$dir" >&2
 }
 
 fullpath(){
@@ -281,8 +280,8 @@ Storage=${Storage:-"$(makeStorageCwd "$Global")"}
 Tree=${Tree:-"$Storage/tree"}
 mkdir -p "$Storage" "$Tree"
 Mountlog=$Storage/mountlog
-Upper=$Tree/upper
-Lower=$Tree/lower
+Upper=upper
+Lower=lower
 
 grep -zq . "$Mountlog" 2>/dev/null && {
 	log "$Mountlog" is not empty, indicating bad unmounting. Investigate and remove the file.
@@ -292,10 +291,10 @@ grep -zq . "$Mountlog" 2>/dev/null && {
 trap exiter EXIT
 command mount -t tmpfs tmpfs "$Tree"
 command mount --make-rslave "$Tree"
-mkdir "$Lower" "$Upper"
+mkdir "$Tree/$Lower" "$Tree/$Upper"
 
 [ "$Root" ] && {
-	placer "$Lower/" "" relative true
+	placer "$Tree/$Lower/" "" root true
 }
 
 eval "$arr1"
@@ -315,8 +314,8 @@ log exiting...
 trap - INT
 
 dedupeFind(){
-	find "$Upper" -mindepth 1 -depth "$@" -print0 |
-		(printf %s\\0 "$Tree"; cut -zb "$(printf %s "$Upper/" | wc -c)"-) |
+	find "$Tree/$Upper" -mindepth 1 -depth "$@" -print0 |
+		(printf %s\\0 "$Tree"; cut -zb "$(printf %s "$Tree/$Upper/" | wc -c)"-) |
 		awk -v "upper=${Upper##*/}" -v "lower=${Lower##*/}" '
 			BEGIN { RS="\0"; ORS="\0" }
 			{
@@ -333,7 +332,7 @@ dedupeFind(){
 
 [ "$dedupe" ] && {
 	tmp=$(mktemp)
-	log looking for duplicates in "$Upper"
+	log looking for duplicates in "$Tree/$Upper"
 	# unshare creates a new pid namespace so that pid collisions are impossible
 	dedupeFind -type f | unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
 			until [ $# -lt 2 ]; do
