@@ -9,7 +9,7 @@
 # notes:
 # 	utils-linux BUG! your source dir cannot have an odd number of double quotes in the path.
 
-# 	Without using -root, as root, in the root namespace, moving files from lowerdir will *copy*
+# 	Without using -su, as root, in the root namespace, moving files from lowerdir will *copy*
 # 	them, using disk space, among other overlayfs downsides.
 
 # 	Putting Storage on a fuse mount will fail if it was mounted in a different user namespace. To
@@ -156,7 +156,7 @@ placer(){
 	mount -t overlay overlay -o "${overopts:-userxattr}" \
 		-o "lowerdir=$lowerdir" \
 		-o "upperdir=$I/data,workdir=$I/work" \
-		"$Overlay$sink" && log overlayed "$source --> $Overlay$sink" || s=1
+		"$Root$sink" && log overlayed "$source --> $Root$sink" || s=1
 	return $s
 }
 
@@ -182,15 +182,8 @@ makeDir(){
 
 fullpath(){
 	case $1 in
-		full)
-			args='-msz'
-			;;
-		sym)
-			args='-mz'
-			;;
-		relative)
-			args='-msz --relative-base=.'
-			;;
+		full) args='-mz' ;;
+		relative) args='-mz --relative-base=.' ;;
 	esac
 	realpath $args -- "$2" | tr -d \\0
 	printf /
@@ -200,35 +193,11 @@ fullpath(){
 # outputs \0 delimited key-value pairs
 placeOptsParse()(
 	opts=$1
-	source=$(fullpath full "$2")
-	if [ "$Overlay" ]; then
-		sink=$(fullpath relative "$3")
-	else
-		sink=$(fullpath full "$3")
-	fi
+	source=$2
+	sink=$3
 	echo "$opts" | grep -qF i && printf %s\\0 source "$source"
 	echo "$opts" | grep -qF o && printf %s\\0 sink "$sink"
 )
-
-place(){
-	opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
-	source=$2
-	case $# in
-		3) # place
-			sink=$3
-			opts=${opts:-"o"} # default
-			shift
-			;;
-		2) # replace
-			sink=$source
-			opts=${opts:-"io"} # default
-			;;
-	esac
-	[ "$Overlay" ] && sink=${sink#/}
-	Keys=${Keys:-"$(placeOptsParse "$opts" "$source" "$sink" | escapist)"}
-	eval 'placer "$source" "$sink"' "$Keys"
-	Keys=''
-}
 
 while true; do
 	case $1 in
@@ -238,23 +207,23 @@ while true; do
 		-i|-interactive)
 			interactive=true
 			;;
-		-overlay)
-			Overlay=$(fullpath sym "$2")
-			makeDir "$Overlay" || exit
+		-root)
+			Root=$(fullpath full "$2")
+			makeDir "$Root" || exit
 			shift
 			;;
 		-tree)
-			Tree=$(fullpath sym "$2")
+			Tree=$(fullpath full "$2")
 			Tree=${Tree%/}
 			shift
 			;;
 		-global)
-			Global=$(fullpath sym "$2")
+			Global=$(fullpath full "$2")
 			makeDir "$Global" || exit
 			shift
 			;;
 		-storage)
-			Storage=$(fullpath sym "$2")
+			Storage=$(fullpath full "$2")
 			Storage=${Storage%/}
 			shift
 			;;
@@ -263,22 +232,38 @@ while true; do
 			shift
 			;;
 		-key)
-			Keys=$Keys$(escapist "$2" "$3")
+			keys=$keys$(escapist "$2" "$3")
 			shift 2
 			;;
 		-opts)
 			Opts=$2
 			shift
 			;;
-		-place*)
-			commadd arr1 place "$1" "$2" "$3"
-			shift 2
+		-relative)
+			Relative=true
 			;;
-		-replace*)
-			commadd arr1 place "$1" "$2" "$2"
+		-place*|-replace*)
+			opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
+			[ "$Relative" ] && arg=relative || arg=full
+			source=$(fullpath $arg "$2")
+			case $1 in
+				-place*)
+					sink=$(fullpath $arg "$3")
+					opts=${opts:-"o"} # default
+					shift
+					;;
+				-replace*)
+					sink=$source
+					opts=${opts:-"io"} # default
+					;;
+			esac
+			[ "$Root" ] && sink=${sink#/} # yucky...
+			keys=${keys:-"$(placeOptsParse "$opts" "$source" "$sink" | escapist)"}
+			eval 'commadd arr1 placer "$source" "$sink"' "$keys"
+			keys=''
 			shift
 			;;
-		-root)
+		-su)
 			overopts=xino=auto,uuid=auto,metacopy=on
 			;;
 		--)
@@ -309,7 +294,7 @@ command mount -t tmpfs tmpfs "$Tree"
 command mount --make-rslave "$Tree"
 mkdir "$Lower" "$Upper"
 
-[ "$Overlay" ] && {
+[ "$Root" ] && {
 	placer "$Lower/" "" relative true
 }
 
