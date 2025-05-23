@@ -146,17 +146,17 @@ placer(){
 	}
 	lowerdir=$(printf %s "$source" | sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g'; echo x)
 	lowerdir=${lowerdir%x}
+
+	[ "$source" != "$Lower/$sink" ] && {
+		mount -o bind,ro -- "$source" "$Lower/$sink" &&
+			log bound "$source --> $Lower/${sink#/}" || s=1
+		mount -o bind -- "$I/data" "$Upper/$sink" &&
+			log bound "$I/data --> $Upper/${sink#/}" || s=1
+	}
 	mount -t overlay overlay -o "${overopts:-userxattr}" \
 		-o "lowerdir=$lowerdir" \
 		-o "upperdir=$I/data,workdir=$I/work" \
-		"$Overlay$sink" && log overlayed "$source --> $Overlay$sink" && {
-			[ "$source" != "$Lower/$sink" ] && {
-				mount -o bind,ro -- "$source" "$Lower/$sink" &&
-					log bound "$source --> $Lower/${sink#/}" || s=1
-			}
-		}
-		mount -o bind -- "$I/data" "$Upper/$sink" &&
-			log bound "$I/data --> $Upper/${sink#/}" || s=1
+		"$Overlay$sink" && log overlayed "$source --> $Overlay$sink" || s=1
 	return $s
 }
 
@@ -191,7 +191,6 @@ fullpath(){
 		relative)
 			args='-msz --relative-base=.'
 			;;
-
 	esac
 	realpath $args -- "$2" | tr -d \\0
 	printf /
@@ -256,6 +255,7 @@ while true; do
 			;;
 		-storage)
 			Storage=$(fullpath sym "$2")
+			Storage=${Storage%/}
 			shift
 			;;
 		-id)
@@ -338,7 +338,12 @@ dedupeFind(){
 				if (NR == 1) tree = $0;
 				else print tree "/" upper $0 ORS tree "/" lower $0
 			}
-		'
+		' | xargs -0 sh -c '
+			until [ $# -lt 2 ]; do
+				[ -e "$2" ] && printf %s\\0 "$1" "$2"
+				shift 2
+			done
+		' sh
 }
 
 [ "$dedupe" ] && {
@@ -346,7 +351,7 @@ dedupeFind(){
 	log looking for duplicates in "$Upper"
 	# unshare creates a new pid namespace so that pid collisions are impossible
 	dedupeFind -type f | unshare -rmpf --mount-proc -- xargs -0 -n 64 -- sh -c '
-			until [ $# -le 0 ]; do
+			until [ $# -lt 2 ]; do
 				(cmp -s -- "$1" "$2" && { waitpid "$pid" 2>/dev/null; printf "%s\0" "$1"; } ) & pid=$!
 				shift 2
 			done
