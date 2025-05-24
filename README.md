@@ -16,13 +16,13 @@ or even dirs only writable by other users (like root), provided you can write to
 
 ## Quickstart
 
-Mount "foo" as an overlay at location "baz":
+Mount directory "foo" as an overlay at directory "baz":
 ```sh
 overlay.sh -place foo baz
 ```
 Mount "foo" as an overlay on top of itself:
 ```sh
-overlay.sh -replace foo
+overlay.sh -replace foo # same as "-place foo foo"
 ```
 Mount "foo" on top of itself, keeping overlay.sh's data inside "qux"
 ```sh
@@ -75,7 +75,7 @@ can be set by using -key more than once:
 ```sh
 overlay.sh -key myDir true -key yourDir false -place ./foo ./baz
 ```
-All "io" options are ignored when using -key.
+All "io" options are ignored when using -key. Key and value strings allow any character except \0.
 
 ## Global storage system
 
@@ -90,22 +90,22 @@ information for operation and all the individual source dir storages, called Ind
 Indexes are directories named with numbers that contain storage for a particular -place argument and
 an "id" file that contains key-value pairs to identify them.
 
-By default, Storage is set to `$Global/by-cwd/$hash` where the hash is SHA1 as base64 created from
-your current working directory (cwd).
+By default, Storage is set to `$Global/by-cwd/$hash` where the hash is SHA1 as base64url created
+from your current working directory (cwd).
 
 A Global path will look something like this:
 ```
     $ tree ~/.local/share/overlay.sh
 /home/user/.local/share/overlay.sh
 └── by-cwd
-    ├── 0LjknW4Ia5uPFD+17RqTF2S4XN8=
+    ├── 0LjknW4Ia5uPFD-17RqTF2S4XN8
     │   ├── 0
     │   │   ├── data/
     │   │   ├── id
     │   │   └── work/
     │   ├── name
     │   └── tree/
-    └── PEOlF35TGDZlXyT30+6Xe0TmfSo=
+    └── PEOlF35TGDZlXyT30-6Xe0TmfSo
         ├── 0
         │   ├── data/
         │   ├── id
@@ -143,29 +143,18 @@ the same syntax as -storage.
 ## The "tree"
 
 For convenience, debugging, transparency, and internal utility, every Storage has a "tree" directory
-that, when overlay.sh is active, mounts a tmpfs with 2 subdirs, "upper" and "lower".
+that, when overlay.sh is active, mounts a tmpfs with 3 subdirs, "upper", "lower", and "overlay".
 
-Lower, representing OverlayFS's 'lowerdir' mount option, contains a tree of every sink dir path in
-the overlay.sh instance, but only having the contents of their respective *source* dirs.
+Overlay contains a tree of all overlay mounted sink dirs.
+
+Lower, representing OverlayFS's 'lowerdir' mount option, contains a tree of every sink dir path, but
+only holds the contents of its respective source dirs.
 
 Upper, representing the 'upperdir' mount option, contains an exact copy of the Lower tree, but only
-has the contents of its respective Index/data dirs.
+holds the contents of its respective Index/data dirs.
 
-This allows you to browse and compare the exact makeup of your created overlay mounts, separated
-into the read-only and read-write counterparts.
-
-## "Root" mode
-
-Using -root lets you set a directory on which all mount sinks are interpreted relative to the Root
-dir. This command:
-```sh
-overlay.sh -root ./overlay -place ./foo ./baz
-```
-mounts ./foo to ./overlay/baz. Also, the directories required to get (baz) there are created
-automatically, unlike in normal mode.
-
-The auto dir creation is based on overlaying Tree/Lower to Root before any other overlay mounts are
-made.
+The Tree allows you to freely browse your mounts and compare the exact makeup of them, as separated
+by their read-only and read-write counterparts.
 
 ## Superuser mode
 
