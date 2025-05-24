@@ -1,12 +1,12 @@
 #!/bin/sh
 
 # todo:
-# 	recursive mounts
-# 	allow mixing of -overlay and not
-# 	dedupe things besides files and dirs (symlinks, sockets...)
-# 	clean unused indexes
-# 	ponder using a permanent Root dir inside of Tree, like the old format, and make default behavior
-# 	bind those overlay mountpoints to specified sinks.
+# 	-recursive mounts
+# 	-dedupe things besides files and dirs (symlinks, sockets...)
+# 	-clean unused indexes
+# 	-non-command mode, where you are already privileged and can make overlays freely without entering
+# 	a new shell or running a new command, and are free to re-run overlay.sh with some -unmount
+# 	argument to undo the damage. mountlog may be harder to handle
 
 # notes:
 # 	utils-linux BUG! your source dir cannot have an odd number of double quotes in the path.
@@ -124,15 +124,16 @@ escapist(){
 		sed -z 's/'\''/'\''\\'\'\''/g; s/\(.*\)/'\''\1'\''/g' | tr '\0' ' '
 }
 
-# takes source, sink, then key-value pairs.
+# takes whether to bind outside of tree, then source, sink, and key-value pairs.
 # if the pairs show a match, mount with the existing index.
 # otherwise, make a new index with those pairs.
 placer(){
 	s=0
-	source=$1
-	sink=$2
-	shift 2
-	mkdir -p "$Tree/$Upper/$sink" "$Tree/$Lower/$sink"
+	bind=$1
+	source=$2
+	sink=$3
+	shift 3
+	mkdir -p "$Tree/$Lower/$sink"
 	unset I
 	I=$(getIndex "$Storage" "$@")
 	[ "$I" ] || {
@@ -151,7 +152,13 @@ placer(){
 	mount -t overlay overlay -o "${overopts:-userxattr}" \
 		-o "lowerdir=$lowerdir" \
 		-o "upperdir=$I/data,workdir=$I/work" \
-		"$Root$sink" && log overlayed "$source --> $Root$sink" || s=1
+		"$Overlay/$sink" && {
+			log overlayed "$source --> $Overlay/$sink"
+			[ "$bind" = 1 ] && [ "$sink" ] && {
+				mount -o bind -- "$Overlay/$sink" "$sink" &&
+					log bound "$Overlay/${sink#/} --> $sink" || s=1
+			}
+		} || s=1
 	return $s
 }
 
@@ -162,8 +169,8 @@ exiter(){
 makeStorageCwd(){
 	cwd=$(realpath -z .; echo x)
 	cwd=${cwd%x}
-	# base64 of a hash but / is replaced with _
-	out="$1/by-cwd/$(printf %s "$cwd" | openssl dgst -sha1 -binary | openssl enc -base64 | tr / _)"
+	# hash of cwd encoded in base64url
+	out="$1/by-cwd/$(printf %s "$cwd" | openssl dgst -sha1 -binary | openssl enc -base64 | tr +/ -_ | tr -d =)"
 	makeDir "$out" || exit
 	printf %s "$cwd" >"$out"/name
 	printf %s "$out"
@@ -222,10 +229,10 @@ for Pass in 1 2; do
 			-i|-interactive)
 				interactive=true
 				;;
-			-root)
+			-overlay)
 				shift=2
-				Root=$(fullpath full "$2")
-				makeDir "$Root" || exit
+				overlay=$(fullpath full "$2")
+				makeDir "$overlay" || exit
 				;;
 			-t|-tree)
 				shift=2
@@ -254,24 +261,30 @@ for Pass in 1 2; do
 				shift=2
 				Opts=$2
 				;;
-			-r|-relative) # ponder making this default
+			-R|-relative) # ponder making this default
 				Relative=true
 				;;
-			-P*|-place*|-R*|-replace*)
+			-N|-neverbind)
+				Bind=0
+				;;
+			-n|-nobind)
+				bind=0
+				;;
+			-p*|-r*) # -place, -replace
 				pass 2 && {
 					opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
 					[ "$Relative" ] && arg=relative || arg=full
 					source=$(fullpath $arg "$2")
 				}
 				case $1 in
-					-[pP]*)
+					-p*)
 						shift=3
 						pass 2 "$@" && {
 							sink=$(fullpath $arg "$3")
 							opts=${opts:-"o"} # default
 						}
 						;;
-					-[rR]*)
+					-r*)
 						shift=2
 						pass 2 "$@" && {
 							sink=$source
@@ -280,10 +293,11 @@ for Pass in 1 2; do
 						;;
 				esac
 				pass 2 && {
-					[ "$Root" ] && sink=${sink#/} # yucky...
+					bind=${bind:-"$Bind"}
 					keys=${keys:-"$(placeOptsParse "$opts" "$source" "$sink" | escapist)"}
-					eval 'placer "$source" "$sink"' "$keys"
+					eval 'placer "${bind:-1}" "$source" "$sink"' "$keys"
 					keys=''
+					bind=''
 				}
 				;;
 			-su)
@@ -306,6 +320,7 @@ for Pass in 1 2; do
 		Mountlog=$Storage/mountlog
 		Upper=upper
 		Lower=lower
+		Overlay=$Tree/overlay
 
 		grep -zq . "$Mountlog" 2>/dev/null && {
 			log "$Mountlog" is not empty, indicating bad unmounting. Investigate and remove the file.
@@ -315,14 +330,13 @@ for Pass in 1 2; do
 		trap exiter EXIT
 		command mount -t tmpfs tmpfs "$Tree"
 		command mount --make-rslave "$Tree"
-		mkdir "$Tree/$Lower" "$Tree/$Upper"
-
-		[ "$Root" ] && {
-			placer "$Tree/$Lower/" "" root true
-		}
+		mkdir "$Tree/$Lower" "$Tree/$Upper" "$Overlay"
+		mount -o bind,ro -- "$Tree/$Lower" "$Tree/$Upper"
+		placer 0 "$Tree/$Lower/" "" overlay true
 	}
 done
 rm "$argfile"
+[ "$overlay" ] && mount -o rbind -- "$Overlay" "$overlay"
 
 trap 'log INT recieved' INT # TODO: signal handling
 if [ $# -ge 1 ]; then
