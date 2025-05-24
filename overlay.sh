@@ -124,13 +124,6 @@ escapist(){
 		sed -z 's/'\''/'\''\\'\'\''/g; s/\(.*\)/'\''\1'\''/g' | tr '\0' ' '
 }
 
-# store arguments as a command inside an eval-able variable named $1
-commadd(){
-	v=$1
-	shift
-	eval "$v=\$$v"'"$(escapist "$@");"'
-}
-
 # takes source, sink, then key-value pairs.
 # if the pairs show a match, mount with the existing index.
 # otherwise, make a new index with those pairs.
@@ -201,106 +194,135 @@ placeOptsParse()(
 	echo "$opts" | grep -qF o && printf %s\\0 sink "$sink"
 )
 
-while true; do
-	case $1 in
-		-d|-dedupe)
-			dedupe=true
-			;;
-		-i|-interactive)
-			interactive=true
-			;;
-		-root)
-			Root=$(fullpath full "$2")
-			makeDir "$Root" || exit
-			shift
-			;;
-		-t|-tree)
-			Tree=$(fullpath full "$2")
-			Tree=${Tree%/}
-			shift
-			;;
-		-g|-global)
-			Global=$(fullpath full "$2")
-			makeDir "$Global" || exit
-			shift
-			;;
-		-s|-storage)
-			Storage=$(fullpath full "$2")
-			Storage=${Storage%/}
-			shift
-			;;
-		-id)
-			Storage="$Global/by-name/$2"
-			shift
-			;;
-		-k|key)
-			keys=$keys$(escapist "$2" "$3")
-			shift 2
-			;;
-		-opts)
-			Opts=$2
-			shift
-			;;
-		-r|-relative) # ponder making this default
-			Relative=true
-			;;
-		-P*|-place*|-R*|-replace*)
-			opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
-			[ "$Relative" ] && arg=relative || arg=full
-			source=$(fullpath $arg "$2")
-			case $1 in
-				-[pP]*)
-					sink=$(fullpath $arg "$3")
-					opts=${opts:-"o"} # default
-					shift
-					;;
-				-[rR]*)
-					sink=$source
-					opts=${opts:-"io"} # default
-					;;
-			esac
-			[ "$Root" ] && sink=${sink#/} # yucky...
-			keys=${keys:-"$(placeOptsParse "$opts" "$source" "$sink" | escapist)"}
-			eval 'commadd arr1 placer "$source" "$sink"' "$keys"
-			keys=''
-			shift
-			;;
-		-su)
-			overopts=xino=auto,uuid=auto,metacopy=on
-			;;
-		--)
-			shift
-			break;;
-		*)
-			break;;
-	esac
+# for use in flag parsing
+pass(){
+	[ "$Pass" -eq "$1" ] && return 0
 	shift
+	[ $# -lt $shift ] && return 1
+	i=0
+	while [ $i -lt "$shift" ]; do
+		printf %s\\0 "$1" >> "$argfile"
+		i=$((i + 1))
+		shift
+	done
+	return 1
+}
+
+argfile=$(mktemp)
+
+for Pass in 1 2; do
+	[ "$Pass" -gt 1 ] && eval set -- "$(escapist <"$argfile")" '"$@"'
+	: > "$argfile"
+	while true; do
+		shift=1
+		case $1 in
+			-d|-dedupe)
+				dedupe=true
+				;;
+			-i|-interactive)
+				interactive=true
+				;;
+			-root)
+				shift=2
+				Root=$(fullpath full "$2")
+				makeDir "$Root" || exit
+				;;
+			-t|-tree)
+				shift=2
+				Tree=$(fullpath full "$2")
+				Tree=${Tree%/}
+				;;
+			-g|-global)
+				shift=2
+				Global=$(fullpath full "$2")
+				makeDir "$Global" || exit
+				;;
+			-s|-storage)
+				shift=2
+				Storage=$(fullpath full "$2")
+				Storage=${Storage%/}
+				;;
+			-id)
+				shift=2
+				Storage="$Global/by-name/$2"
+				;;
+			-k|key)
+				shift=3
+				pass 2 "$@" && keys=$keys$(escapist "$2" "$3")
+				;;
+			-opts)
+				shift=2
+				Opts=$2
+				;;
+			-r|-relative) # ponder making this default
+				Relative=true
+				;;
+			-P*|-place*|-R*|-replace*)
+				pass 2 && {
+					opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
+					[ "$Relative" ] && arg=relative || arg=full
+					source=$(fullpath $arg "$2")
+				}
+				case $1 in
+					-[pP]*)
+						shift=3
+						pass 2 "$@" && {
+							sink=$(fullpath $arg "$3")
+							opts=${opts:-"o"} # default
+						}
+						;;
+					-[rR]*)
+						shift=2
+						pass 2 "$@" && {
+							sink=$source
+							opts=${opts:-"io"} # default
+						}
+						;;
+				esac
+				pass 2 && {
+					[ "$Root" ] && sink=${sink#/} # yucky...
+					keys=${keys:-"$(placeOptsParse "$opts" "$source" "$sink" | escapist)"}
+					eval 'placer "$source" "$sink"' "$keys"
+					keys=''
+				}
+				;;
+			-su)
+				overopts=xino=auto,uuid=auto,metacopy=on
+				;;
+			--)
+				shift
+				break;;
+			*)
+				break;;
+		esac
+		shift $shift
+	done
+	[ $Pass -eq 1 ] && {
+		XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
+		Global=${Global:-"${GLOBAL:-"$XDG_DATA_HOME/$programName"}"}
+		Storage=${Storage:-"$(makeStorageCwd "$Global")"}
+		Tree=${Tree:-"$Storage/tree"}
+		mkdir -p "$Storage" "$Tree"
+		Mountlog=$Storage/mountlog
+		Upper=upper
+		Lower=lower
+
+		grep -zq . "$Mountlog" 2>/dev/null && {
+			log "$Mountlog" is not empty, indicating bad unmounting. Investigate and remove the file.
+			exit 1
+		}
+
+		trap exiter EXIT
+		command mount -t tmpfs tmpfs "$Tree"
+		command mount --make-rslave "$Tree"
+		mkdir "$Tree/$Lower" "$Tree/$Upper"
+
+		[ "$Root" ] && {
+			placer "$Tree/$Lower/" "" root true
+		}
+	}
 done
-
-XDG_DATA_HOME="${XDG_DATA_HOME-"$HOME/.local/share"}"
-Global=${Global:-"${GLOBAL:-"$XDG_DATA_HOME/$programName"}"}
-Storage=${Storage:-"$(makeStorageCwd "$Global")"}
-Tree=${Tree:-"$Storage/tree"}
-mkdir -p "$Storage" "$Tree"
-Mountlog=$Storage/mountlog
-Upper=upper
-Lower=lower
-
-grep -zq . "$Mountlog" 2>/dev/null && {
-	log "$Mountlog" is not empty, indicating bad unmounting. Investigate and remove the file.
-	exit 1
-}
-
-trap exiter EXIT
-command mount -t tmpfs tmpfs "$Tree"
-command mount --make-rslave "$Tree"
-mkdir "$Tree/$Lower" "$Tree/$Upper"
-
-[ "$Root" ] && {
-	placer "$Tree/$Lower/" "" root true
-}
-
-eval "$arr1"
+rm "$argfile"
 
 trap 'log INT recieved' INT # TODO: signal handling
 if [ $# -ge 1 ]; then
