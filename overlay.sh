@@ -4,6 +4,9 @@
 # 	recursive mounts
 # 	allow mixing of -overlay and not
 # 	dedupe things besides files and dirs (symlinks, sockets...)
+# 	clean unused indexes
+# 	ponder using a permanent Root dir inside of Tree, like the old format, and make default behavior
+# 	bind those overlay mountpoints to specified sinks.
 
 # notes:
 # 	utils-linux BUG! your source dir cannot have an odd number of double quotes in the path.
@@ -211,17 +214,17 @@ while true; do
 			makeDir "$Root" || exit
 			shift
 			;;
-		-tree)
+		-t|-tree)
 			Tree=$(fullpath full "$2")
 			Tree=${Tree%/}
 			shift
 			;;
-		-global)
+		-g|-global)
 			Global=$(fullpath full "$2")
 			makeDir "$Global" || exit
 			shift
 			;;
-		-storage)
+		-s|-storage)
 			Storage=$(fullpath full "$2")
 			Storage=${Storage%/}
 			shift
@@ -230,7 +233,7 @@ while true; do
 			Storage="$Global/by-name/$2"
 			shift
 			;;
-		-key)
+		-k|key)
 			keys=$keys$(escapist "$2" "$3")
 			shift 2
 			;;
@@ -238,20 +241,20 @@ while true; do
 			Opts=$2
 			shift
 			;;
-		-relative)
+		-r|-relative) # ponder making this default
 			Relative=true
 			;;
-		-place*|-replace*)
+		-P*|-place*|-R*|-replace*)
 			opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
 			[ "$Relative" ] && arg=relative || arg=full
 			source=$(fullpath $arg "$2")
 			case $1 in
-				-place*)
+				-[pP]*)
 					sink=$(fullpath $arg "$3")
 					opts=${opts:-"o"} # default
 					shift
 					;;
-				-replace*)
+				-[rR]*)
 					sink=$source
 					opts=${opts:-"io"} # default
 					;;
