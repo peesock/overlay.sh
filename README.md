@@ -2,7 +2,7 @@
 
 Transparently mounts overlay filesystems with automatic storage placement.
 
-## What is overlayFS
+## What is OverlayFS
 
 OverlayFS is a linux filesystem that lets you mount a source directory somewhere else where all
 changes made to it — new files, removal of files, changed files and directories, etc — are actually
@@ -156,19 +156,97 @@ holds the contents of its respective Index/data dirs.
 The Tree allows you to freely browse your mounts and compare the exact makeup of them, as separated
 by their read-only and read-write counterparts.
 
-## Superuser mode
+## Root mode
 
 A quirk of OverlayFS and the Xattrs it uses to do its magic is that a lot of useful features are
-locked behind real, genuine, root namespace, superuser access.
+locked behind real, genuine, root namespace, root user access.
 
-Running in normal user mode means, among other things, that *moving* directories inside an overlay
-will not actually move them — it will *copy* them.
+Running in normal user mode means, among other things, that moving directories inside an overlay
+that come from the source dir will not actually move them — it will *copy* them.
 
 That means if you want to use OverlayFS to rename a large root-owned directory like /usr to /usr2 in
 your personal chroot experiment, it will copy everything inside /usr to achieve it.
 
-Instead, either use bind mounts, or run overlay.sh as superuser, using the -su flag.
+Instead, either use bind mounts to rename things or run overlay.sh as superuser with the -su flag.
 
 ## Usage
 
-I will write this later :appel:
+## Examples
+
+## Strange behavior
+
+Due to complicated kernel permission and namespace and mounting rules, there are many unexpected
+edge cases.
+
+### Unprivileged submount viewing
+
+Paths not owned by your user that contain submounts cannot be overlayed on their own.
+
+OverlayFS cannot view submounts in the source dir. For example attempting to do `overlay.sh -replace
+/` would render the /tmp directory empty, as it is a separate mount under root.
+
+If you are not the root user, this actually opens a security risk, as root may have placed sensitive
+files under /tmp before hiding them with the tmpfs mount. So this is not allowed.   
+(This is also the reason bind mounts in this scenario need `-o rbind` instead of `-o bind`; rbind
+mounts the entire tree so snooping is impossible.)
+
+Beyond manually copying everything under /, it can be worked around by using fuse-overlayfs to
+replace the kernel version, or mergerfs, unionfs, bindfs, or any other FUSE "passthrough" system
+between the real source dir and what you feed overlay.sh.
+
+For example:
+```sh
+bindfs / ~/fakeRoot
+overlay.sh -place ~/fakeRoot / -- ls /tmp
+```
+However this will probably error out anyway due to attempting to run pseudo-filesystems like /dev,
+/sys, and /proc through FUSE and pretending that's okay to run your system on. Overlaying root
+requires more setup.
+
+Hopefully OverlayFS adds submount support at some point...
+
+### FUSE privileges
+
+Putting Storage on a FUSE mount will fail if it was mounted in a different user namespace.
+
+This means that this:
+```sh
+sshfs 192.168.0.69: mount/ # mount a remote user's $HOME fs onto mount/
+overlay.sh -storage mount/bozoStorage -replace ./browser_history -- Ladybird
+```
+under usual circumstances (not already running in a privileged namespace), will fail to mount an
+overlay with a permission error.
+
+Of course, you *should* have ownership of mount/, but something about it being FUSE, which is a
+hacky mess according to kernel devs, and specifically OverlayFS being in a different user namespace
+created by overlay.sh errors it out.
+
+To fix this, drop into a new user and mount namespace with `unshare` before mounting FUSE:
+```sh
+unshare -cm --keep-caps
+sshfs 192.168.0.69: mount/
+overlay.sh -storage mount/bozoStorage -replace ./browser_history -- Ladybird
+```
+overlay.sh will detect your capabilities and keep you in the same namespace.
+
+### Socket files
+
+Socket files that are already in use before being placed in an overlay cannot be used in the
+overlay. All prior connections must be terminated first.
+
+That means you can't just `overlay.sh -replace /tmp`, because /tmp contains your Xorg socket, which
+will prevent you from launching new X programs.
+
+### Filesystem capabilities
+
+When you mount an overlay, it will probably produce warning messages in your kernel log (run `sudo
+dmesg -H | tail`) telling you what the filesystem is supposed to support, but doesn't.
+
+These are usually just warnings, but some filesystems are truly not supported. For example Storage
+locations *need* Xattr support, which a lot of FUSE fs's lack.
+
+### Actual bug
+
+As of util-linux 2.41, while rare, source dir paths cannot contain an odd number of double quotes.
+
+They have an open issue for it that should be resolved in the next release.
