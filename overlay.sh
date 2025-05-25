@@ -8,19 +8,6 @@
 # 	a new shell or running a new command, and are free to re-run overlay.sh with some -unmount
 # 	argument to undo the damage. mountlog may be harder to handle
 
-# notes:
-# 	utils-linux BUG! your source dir cannot have an odd number of double quotes in the path.
-
-# 	Without using -su, as root, in the root namespace, moving files from lowerdir will *copy*
-# 	them, using disk space, among other overlayfs downsides.
-
-# 	Putting Storage on a fuse mount will fail if it was mounted in a different user namespace. To
-# 	avoid using root, you can run `unshare -cm --keep-caps "$SHELL"` to drop into a privileged
-# 	namespace before mounting fuse, and this script will detect those capabilities and keep you in
-# 	the same namespace.
-
-# 	Socket files don't work until all prior connections are terminated.
-
 [ "$1" = 1 ] && shift ||
 	[ "$(id -u)" = 0 ] ||
 	capsh --current | grep -qFi cap_sys_admin ||
@@ -230,7 +217,7 @@ for Pass in 1 2; do
 			-i|-interactive)
 				interactive=true
 				;;
-			-overlay)
+			-o|-overlay)
 				shift=2
 				overlay=$(fullpath full "$2")
 				makeDir "$overlay" || exit
