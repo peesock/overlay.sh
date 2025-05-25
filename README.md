@@ -33,9 +33,68 @@ Run a command instead of just dropping into $SHELL:
 overlay.sh -place foo baz -- mountpoint baz # the "--" is optional
 ```
 
+## Usage
+
+```
+Usage:
+overlay.sh [FLAGS...] [COMMAND]
+
+If COMMAND is not specified and a terminal is attached, launch $SHELL.
+
+Flags:
+
+-p[,OPTS]|-place[,OPTS] SOURCE SINK
+    Overlay mount SOURCE dir on top of SINK dir, optionally using OPTS to change storage access mode.
+
+-r[,OPTS]|-replace[,OPTS] SOURCE
+    Overlay mount SOURCE dir onto itself, optionally using OPTS to change storage access mode.
+    Same as `-place SOURCE SOURCE`.
+
+-d|-dedupe
+    Show and remove all duplicate files and dirs between source and Index.
+
+-i|-interactive
+    Ask before removing files with -dedupe.
+
+-o|-overlay DIR
+    Bind mount Tree/overlay to DIR.
+
+-t|-tree DIR
+    Place Tree at DIR.
+
+-s|-storage DIR
+    Place Storage at DIR.
+
+-g|-global DIR
+    Place Global at DIR.
+
+-id NAME
+    Place Storage at $Global/by-name/NAME.
+
+-k|-key KEY VALUE
+    Modify the next specified overlay mount to access storage labelled by KEY with VALUE.
+    Can be used multiple times for multiple keys per mount.
+
+-opts OPTS
+    OPTS can be i, o, or io, specifying the storage access mode for ALL overlay mounts.
+
+-R|-relative
+    Paths used in storage access keys and in Tree are not converted to absolute paths.
+
+-n|-nobind
+    Modify the next specified overlay mount *not* to bind to the sink dir; keep it inside
+    Tree/overlay.
+
+-N|-neverbind
+    Do not bind sink dir outside of Tree/overlay for ALL overlay mounts.
+
+-su
+    Mount all overlays with options useful for root users.
+```
+
 ## Purpose of overlay.sh
 
-Setting up Overlay mounts is tedious, as it looks like this:
+Setting up overlay mounts is tedious, as it looks like this:
 ```sh
 mount -t overlay overlay -o userxattr \
     -o lowerdir=/path/to/source \
@@ -53,45 +112,49 @@ per-mount.
 
 ## Storage system
 
-By default, the storage path used for a particular source dir is based on the sink dir (mount dir).
-Meaning that for commands `overlay.sh -place ./foo ./baz` and `overlay.sh -place ./bar ./baz`, ./foo
-and ./bar use the same storage because they both went to ./baz.
+The storage locations used for each overlay mount are called Indexes, and the Index used for a
+particular mount is, by default, based on the path of the sink dir (the mount dir).
 
-This is called output mode, and can be changed by adding options to the -place flag like so:
+For the commands `overlay.sh -place ./foo ./baz` and `overlay.sh -place ./bar ./baz`, ./foo and ./bar
+might have different contents, but they use the same Index because they both sink at ./baz.
+
+This is called "output mode," and can be changed by adding options to the -place flag like so:
 ```sh
 overlay.sh -place,i ./foo ./baz
 ```
-Which sets it to use input mode, where storage is based on ./foo being the source.
+Where the "i" sets it to use input mode, where indexing is based on the path of the source dir,
+./foo.
 
-You can explicitly use output mode with `-place,o`, or use both constraints, with `-place,io`.
+You can explicitly use output mode with `-place,o`, or use both constraints with `-place,io`.
 
 ### Keys
 
-Internally, "io" options are key-value pairs set to ["source", "/path/to/source"] and
+Internally, "io" options are key-value pairs that look like ["source", "/path/to/source"] and
 ["sink", "/path/to/sink"] respectively.
 
 Custom keys can be set per-mount by putting `-key key value` before -place. Multiple keys per mount
 can be set by using -key more than once:
 ```sh
-overlay.sh -key myDir true -key yourDir false -place ./foo ./baz
+overlay.sh -key "myDir" "true" -key "yourDir" "false" -place ./foo ./baz
 ```
-All "io" options are ignored when using -key. Key and value strings allow any character except \0.
+All "io" options are ignored when using -key. Boths key and value allow strings with any characters
+besides '\0'.
 
 ## Global storage system
 
-The entire storage system of overlay.sh consists of "Global" and "Storage" paths, where Global sets a
-system-wide location to place different Storages for convenience.
+The full storage system of overlay.sh consists of "Global" and "Storage" paths, where Global is a
+fixed location to automatically place Storages for convenience.
 
-Global is set to `$XDG_DATA_HOME/overlay.sh`.
+By default Global is set to `$XDG_DATA_HOME/overlay.sh`.
 
-Storage is meant to represent one instance or particular application of overlay.sh, containing
-information for operation and all the individual source dir storages, called Indexes.
+Storage represents one instance or "container" of overlay.sh, containing data needed to run
+overlay.sh and all of the individual overlay dir storages, Indexes.
 
-Indexes are directories named with numbers that contain storage for a particular -place argument and
-an "id" file that contains key-value pairs to identify them.
+Indexes are directories named as numbers, containing "data" and "work" dirs for OverlayFS and an
+"id" file that holds the key-value pairs needed to access the Index.
 
-By default, Storage is set to `$Global/by-cwd/$hash` where the hash is SHA1 as base64url created
-from your current working directory (cwd).
+By default, Storage is set to `$Global/by-cwd/HASH` where HASH is a SHA1 hash created from your
+current working directory (cwd) and encoded in base64url.
 
 A Global path will look something like this:
 ```
@@ -117,59 +180,44 @@ A Global path will look something like this:
         ├── name
         └── tree/
 ```
-The Index/name files are exclusive to "by-cwd" paths, containing the cwd they were created from.
+Index/name files are exclusive to "by-cwd" paths, containing the cwd they were created from.
 
-The Index/tree directories are covered later.
+Index/tree directories are covered later.
 
 If you want to run multiple overlay.sh instances at once from the same working directory, or use
-conflicting Index locations, you will have to set Storage somehow.
+conflicting Index locations, you will have to manually set Storage.
 
 ### Manually set Storage
 
-The -id flag lets you choose any name for a Storage to be placed in `$Global/by-name`, offering an
-easy way to segregate instances without manually making new folders.
+If you need a quick way to separate instances, the -id flag lets you choose a name for a Storage to
+be placed in `$Global/by-name`.
 
-If you need to avoid potential collisions, need a different filesystem than the one offered in
-$Global, or whatever else, you can set Storage directly with -storage.
+If you need to base an instance off of an actual path, need a different filesystem than the one
+offered in Global, etc, you can set Storage directly with -storage.
 
 ```sh
 overlay.sh -id myStorage -place ./foo ./baz
 overlay.sh -storage ./myCoolStorage -place ./foo ./baz
 ```
 
-Global can also be changed, with either the `GLOBAL` environment variable or the -global flag, using
+You can also change Global with either the `GLOBAL` environment variable or the -global flag, using
 the same syntax as -storage.
 
-## The "tree"
+## The tree
 
 For convenience, debugging, transparency, and internal utility, every Storage has a "tree" directory
-that, when overlay.sh is active, mounts a tmpfs with 3 subdirs, "upper", "lower", and "overlay".
+that, when overlay.sh is active, mounts a tmpfs with 3 subdirs: Upper, Lower, and Overlay.
 
-Overlay contains a tree of all overlay mounted sink dirs.
+Overlay contains the tree of all overlay mounts, ie, sink dirs.
 
-Lower, representing OverlayFS's 'lowerdir' mount option, contains a tree of every sink dir path, but
-only holds the contents of its respective source dirs.
+Lower (for OverlayFS's "lowerdir" option) contains the same tree as Overlay, but only holds the
+contents of the overlay mounts' respective source (read-only) dirs.
 
-Upper, representing the 'upperdir' mount option, contains an exact copy of the Lower tree, but only
-holds the contents of its respective Index/data dirs.
+Upper (for OverlayFS's "upperdir" option) only holds the contents of the overlay mounts' respective
+Index/data (read-write) dirs.
 
-The Tree allows you to freely browse your mounts and compare the exact makeup of them, as separated
-by their read-only and read-write counterparts.
-
-## Root mode
-
-A quirk of OverlayFS and the Xattrs it uses to do its magic is that a lot of useful features are
-locked behind real, genuine, root namespace, root user access.
-
-Running in normal user mode means, among other things, that moving directories inside an overlay
-that come from the source dir will not actually move them — it will *copy* them.
-
-That means if you want to use OverlayFS to rename a large root-owned directory like /usr to /usr2 in
-your personal chroot experiment, it will copy everything inside /usr to achieve it.
-
-Instead, either use bind mounts to rename things or run overlay.sh as superuser with the -su flag.
-
-## Usage
+The Tree allows you to easily browse your mounts and see what's happening under the hood via their
+read-only and read-write counterparts.
 
 ## Examples
 
@@ -244,6 +292,19 @@ dmesg -H | tail`) telling you what the filesystem is supposed to support, but do
 
 These are usually just warnings, but some filesystems are truly not supported. For example Storage
 locations *need* Xattr support, which a lot of FUSE fs's lack.
+
+### Root mode
+
+A quirk of OverlayFS and the Xattrs it uses to do its magic is that a lot of useful features are
+locked behind real, genuine, root namespace, root user access.
+
+Running in normal user mode means, among other things, that moving directories inside an overlay
+that come from the source dir will not actually move them — it will *copy* them.
+
+That means if you want to use OverlayFS to rename a large root-owned directory like /usr to /usr2 in
+your personal chroot experiment, it will copy everything inside /usr to achieve it.
+
+Instead, either use bind mounts to rename things, or run overlay.sh with the -su flag as superuser.
 
 ### Actual bug
 
