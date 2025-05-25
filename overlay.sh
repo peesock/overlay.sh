@@ -7,6 +7,7 @@
 # 	-non-command mode, where you are already privileged and can make overlays freely without entering
 # 	a new shell or running a new command, and are free to re-run overlay.sh with some -unmount
 # 	argument to undo the damage. mountlog may be harder to handle
+# 	-less verbose logging
 
 [ "$1" = 1 ] && shift ||
 	[ "$(id -u)" = 0 ] ||
@@ -150,10 +151,6 @@ placer(){
 	return $s
 }
 
-exiter(){
-	[ -e "$Mountlog" ] && rm "$Mountlog"
-}
-
 makeStorageCwd(){
 	cwd=$(realpath -z .; echo x)
 	cwd=${cwd%x}
@@ -173,7 +170,7 @@ makeDir(){
 fullpath(){
 	case $1 in
 		full) args='-mz' ;;
-		relative) args='-mz --relative-base=.' ;;
+		relative) args='-mz --relative-to=.' ;;
 	esac
 	realpath $args -- "$2" | tr -d \\0
 	printf /
@@ -203,7 +200,13 @@ pass(){
 	return 1
 }
 
+exiter(){
+	[ "$Mountlog" ] && rm "$Mountlog"
+	[ "$argfile" ] && rm "$argfile"
+}
+
 argfile=$(mktemp)
+trap exiter EXIT
 
 for Pass in 1 2; do
 	[ "$Pass" -gt 1 ] && eval set -- "$(escapist <"$argfile")" '"$@"'
@@ -306,16 +309,16 @@ for Pass in 1 2; do
 		Tree=${Tree:-"$Storage/tree"}
 		mkdir -p "$Storage" "$Tree"
 		Mountlog=$Storage/mountlog
+		touch "$Mountlog"
 		Upper=upper
 		Lower=lower
 		Overlay=$Tree/overlay
 
-		grep -zq . "$Mountlog" 2>/dev/null && {
+		grep -zq . "$Mountlog" && {
 			log "$Mountlog" is not empty, indicating bad unmounting. Investigate and remove the file.
 			exit 1
 		}
 
-		trap exiter EXIT
 		command mount -t tmpfs tmpfs "$Tree"
 		command mount --make-rslave "$Tree"
 		mkdir "$Tree/$Lower" "$Tree/$Upper" "$Overlay"
@@ -324,6 +327,8 @@ for Pass in 1 2; do
 	}
 done
 rm "$argfile"
+unset argfile
+
 [ "$overlay" ] && mount -o rbind -- "$Overlay" "$overlay"
 
 trap 'log INT recieved' INT # TODO: signal handling
