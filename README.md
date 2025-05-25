@@ -44,10 +44,10 @@ If COMMAND is not specified and a terminal is attached, launch $SHELL.
 Flags:
 
 -p[,OPTS]|-place[,OPTS] SOURCE SINK
-    Overlay mount SOURCE dir on top of SINK dir, optionally using OPTS to change storage access mode.
+    Overlay mount SOURCE dir onto SINK dir, optionally using OPTS to change Indexing mode.
 
 -r[,OPTS]|-replace[,OPTS] SOURCE
-    Overlay mount SOURCE dir onto itself, optionally using OPTS to change storage access mode.
+    Overlay mount SOURCE dir onto itself, optionally using OPTS to change Indexing mode.
     Same as `-place SOURCE SOURCE`.
 
 -d|-dedupe
@@ -77,9 +77,6 @@ Flags:
 
 -opts OPTS
     OPTS can be i, o, or io, specifying the storage access mode for ALL overlay mounts.
-
--R|-relative
-    Paths used in storage access keys and in Tree are not converted to absolute paths.
 
 -n|-nobind
     Modify the next specified overlay mount *not* to bind to the sink dir; keep it inside
@@ -115,14 +112,15 @@ per-mount.
 The storage locations used for each overlay mount are called Indexes, and the Index used for a
 particular mount is, by default, based on the path of the sink dir (the mount dir).
 
-For the commands `overlay.sh -place ./foo ./baz` and `overlay.sh -place ./bar ./baz`, ./foo and ./bar
-might have different contents, but they use the same Index because they both sink at ./baz.
+For the commands `overlay.sh -place ./foo ./baz` and `overlay.sh -place ./bar ./baz`, ./foo and
+./bar might have different contents, but they use the same Index because they both sink at ./baz.
 
-This is called "output mode," and can be changed by adding options to the -place flag like so:
+This is called "output Indexing mode," and can be changed by adding options to the -place flag like
+so:
 ```sh
 overlay.sh -place,i ./foo ./baz
 ```
-Where the "i" sets it to use input mode, where indexing is based on the path of the source dir,
+Where the "i" sets it to use input mode, where Indexing is based on the path of the source dir,
 ./foo.
 
 You can explicitly use output mode with `-place,o`, or use both constraints with `-place,io`.

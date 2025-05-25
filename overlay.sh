@@ -168,11 +168,14 @@ makeDir(){
 }
 
 fullpath(){
+	arg=
 	case $1 in
-		full) args='-mz' ;;
-		relative) args='-mz --relative-to=.' ;;
+		# only relative if given path is relative
+		rel) [ "${2#/}" = "$2" ] && arg=--relative-to=. ;;
+		base) arg=--relative-base=. ;;
+		full) arg= ;;
 	esac
-	realpath $args -- "$2" | tr -d \\0
+	realpath -mz $arg -- "$2" | tr -d \\0
 	printf /
 }
 
@@ -252,9 +255,6 @@ for Pass in 1 2; do
 				shift=2
 				Opts=$2
 				;;
-			-R|-relative) # ponder making this default
-				Relative=true
-				;;
 			-N|-neverbind)
 				BindNever=0
 				;;
@@ -264,14 +264,15 @@ for Pass in 1 2; do
 			-p*|-r*) # -place, -replace
 				pass 2 && {
 					opts=${Opts:-"$(echo "$1" | cut -sd, -f2)"}
-					[ "$Relative" ] && arg=relative || arg=full
-					source=$(fullpath $arg "$2")
+					source=$(fullpath base "$2")
+					sourceKey=$(fullpath rel "$2")
 				}
 				case $1 in
 					-p*)
 						shift=3
 						pass 2 "$@" && {
-							sink=$(fullpath $arg "$3")
+							sink=$(fullpath base "$3")
+							sinkKey=$(fullpath rel "$3")
 							opts=${opts:-"o"} # default
 						}
 						;;
@@ -279,13 +280,14 @@ for Pass in 1 2; do
 						shift=2
 						pass 2 "$@" && {
 							sink=$source
+							sinkKey=$sourceKey
 							opts=${opts:-"io"} # default
 						}
 						;;
 				esac
 				pass 2 && {
 					Bind=${Bind:-"$BindNever"}
-					keys=${keys:-"$(placeOptsParse "$opts" "$source" "$sink" | escapist)"}
+					keys=${keys:-"$(placeOptsParse "$opts" "$sourceKey" "$sinkKey" | escapist)"}
 					eval 'placer "${Bind:-1}" "$source" "$sink"' "$keys" || exit
 					keys=''
 					Bind=''
