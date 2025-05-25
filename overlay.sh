@@ -140,8 +140,6 @@ placer(){
 		I=$(getNextIndex "$Storage")
 		makeIndex "$I" "$@"
 	}
-	lowerdir=$(printf %s "$source" | sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g'; echo x)
-	lowerdir=${lowerdir%x}
 
 	[ "$source" != "$Tree/$Lower/$sink" ] && {
 		mount -o bind,ro -- "$source" "$Tree/$Lower/$sink" &&
@@ -149,6 +147,9 @@ placer(){
 		mount -o bind -- "$I/data" "$Tree/$Upper/$sink" &&
 			log bound "$I/data --> $Upper/${sink#/}" || s=1
 	}
+
+	lowerdir=$(printf %s "$source" | sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g'; echo x)
+	lowerdir=${lowerdir%x}
 	mount -t overlay overlay -o "${overopts:-userxattr}" \
 		-o "lowerdir=$lowerdir" \
 		-o "upperdir=$I/data,workdir=$I/work" \
@@ -265,10 +266,10 @@ for Pass in 1 2; do
 				Relative=true
 				;;
 			-N|-neverbind)
-				Bind=0
+				BindNever=0
 				;;
 			-n|-nobind)
-				bind=0
+				Bind=0
 				;;
 			-p*|-r*) # -place, -replace
 				pass 2 && {
@@ -293,11 +294,11 @@ for Pass in 1 2; do
 						;;
 				esac
 				pass 2 && {
-					bind=${bind:-"$Bind"}
+					Bind=${Bind:-"$BindNever"}
 					keys=${keys:-"$(placeOptsParse "$opts" "$source" "$sink" | escapist)"}
-					eval 'placer "${bind:-1}" "$source" "$sink"' "$keys"
+					eval 'placer "${Bind:-1}" "$source" "$sink"' "$keys" || exit
 					keys=''
-					bind=''
+					Bind=''
 				}
 				;;
 			-su)
@@ -421,13 +422,10 @@ superUmount(){
 	done
 }
 
-{
-	n=$(tr -cd '\0' <"$Mountlog" | wc -c) 2>/dev/null
-	[ "$n" ] || return
-	for i in $(seq 1 "$n" | tac); do
-		line=$(sed -zn "$i"p <"$Mountlog"; echo x)
-		superUmount "${line%x}"
-	done
-}
+n=$(tr -cd '\0' <"$Mountlog" | wc -c) 2>/dev/null
+for i in $(seq 1 "$n" | tac); do
+	line=$(sed -zn "$i"p <"$Mountlog"; echo x)
+	superUmount "${line%x}"
+done
 
 umount -vl "$Tree"
