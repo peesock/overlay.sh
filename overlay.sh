@@ -8,6 +8,7 @@
 # 	a new shell or running a new command, and are free to re-run overlay.sh with some -unmount
 # 	argument to undo the damage. mountlog may be harder to handle
 # 	-less verbose logging
+# 	-try to protect cwd from being destroyed by a new mount
 
 [ "$1" = 1 ] && shift ||
 	[ "$(id -u)" = 0 ] ||
@@ -112,6 +113,22 @@ escapist(){
 		sed -z 's/'\''/'\''\\'\'\''/g; s/\(.*\)/'\''\1'\''/g' | tr '\0' ' '
 }
 
+escapeOverlayOpts(){
+	fullpath full "$1" | sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g'
+}
+
+fullpath(){
+	arg=
+	case $1 in
+		# only relative if given path is relative
+		rel) [ "${2#/}" = "$2" ] && arg=--relative-to=. ;;
+		base) arg=--relative-base=. ;;
+		full) arg= ;;
+	esac
+	realpath -mz $arg -- "$2" | tr -d \\0
+	printf /
+}
+
 # takes whether to bind outside of tree, then source, sink, and key-value pairs.
 # if the pairs show a match, mount with the existing index.
 # otherwise, make a new index with those pairs.
@@ -122,30 +139,29 @@ placer(){
 	sink=$3
 	shift 3
 	mkdir -p "$Tree/$Lower/$sink"
-	unset I
-	I=$(getIndex "$Storage" "$@")
-	[ "$I" ] || {
-		I=$(getNextIndex "$Storage")
-		makeIndex "$I" "$@"
+	unset Index
+	Index=$(getIndex "$Storage" "$@")
+	[ "$Index" ] || {
+		Index=$(getNextIndex "$Storage")
+		makeIndex "$Index" "$@"
 	}
 
 	[ "$source" != "$Tree/$Lower/$sink" ] && {
 		mount -o bind,ro -- "$source" "$Tree/$Lower/$sink" &&
 			log bound "$source --> $Lower/${sink#/}" || s=1
-		mount -o bind -- "$I/data" "$Tree/$Upper/$sink" &&
-			log bound "$I/data --> $Upper/${sink#/}" || s=1
+		mount -o bind -- "$Index/data" "$Tree/$Upper/$sink" &&
+			log bound "$Index/data --> $Upper/${sink#/}" || s=1
 	}
 
-	lowerdir=$(printf %s "$source" | sed 's/\\/\\\\/g; s/,/\\,/g; s/:/\\:/g; s/"/\\"/g'; echo x)
-	lowerdir=${lowerdir%x}
+	lowerdir=$(escapeOverlayOpts "$source")
+	Index=$(escapeOverlayOpts "$Index")
 	mount -t overlay overlay -o "${overopts:-userxattr}" \
 		-o "lowerdir=$lowerdir" \
-		-o "upperdir=$I/data,workdir=$I/work" \
+		-o "upperdir=$Index/data,workdir=$Index/work" \
 		"$Overlay/$sink" && {
 			log overlayed "$source --> $Overlay/$sink"
 			[ "$bind" = 1 ] && [ "$sink" ] && {
-				mount -o bind -- "$Overlay/$sink" "$sink" &&
-					log bound "$Overlay/${sink#/} --> $sink" || s=1
+				printf %s\\0 "$Overlay/$sink" "$sink" >>"$Bindlist"
 			}
 		} || s=1
 	return $s
@@ -167,18 +183,6 @@ makeDir(){
 	mkdir -pv "$dir" >&2
 }
 
-fullpath(){
-	arg=
-	case $1 in
-		# only relative if given path is relative
-		rel) [ "${2#/}" = "$2" ] && arg=--relative-to=. ;;
-		base) arg=--relative-base=. ;;
-		full) arg= ;;
-	esac
-	realpath -mz $arg -- "$2" | tr -d \\0
-	printf /
-}
-
 # takes opts, then source, then sink
 # outputs \0 delimited key-value pairs
 placeOptsParse()(
@@ -196,7 +200,7 @@ pass(){
 	[ $# -lt $shift ] && return 1
 	i=0
 	while [ $i -lt "$shift" ]; do
-		printf %s\\0 "$1" >> "$argfile"
+		printf %s\\0 "$1" >> "$arglist"
 		i=$((i + 1))
 		shift
 	done
@@ -205,15 +209,42 @@ pass(){
 
 exiter(){
 	[ "$Mountlog" ] && rm "$Mountlog"
-	[ "$argfile" ] && rm "$argfile"
+	[ "$arglist" ] && rm "$arglist"
+	[ "$Bindlist" ] && rm "$Bindlist"
 }
 
-argfile=$(mktemp)
+# command running section
+[ "$1" = 2 ] && {
+	Bindlist=$2
+	binder(){
+		while [ $# -gt 1 ]; do
+			command mount -o bind -- "$1" "$2"
+			shift 2
+		done
+	}
+	eval binder "$(escapist <"$Bindlist")"
+	cd . # in case you just replaced cwd
+
+	shift 2
+	if [ $# -ge 1 ]; then
+		exec "$@"
+	elif [ -t 0 ]; then
+		log entering shell...
+		exec "$SHELL"
+	else
+		log provide a command.
+		exit 1
+	fi
+}
+
+arglist=$(mktemp)
+Bindlist=$(mktemp)
+
 trap exiter EXIT
 
 for Pass in 1 2; do
-	[ "$Pass" -gt 1 ] && eval set -- "$(escapist <"$argfile")" '"$@"'
-	: > "$argfile"
+	[ "$Pass" -gt 1 ] && eval set -- "$(escapist <"$arglist")" '"$@"'
+	: > "$arglist"
 	while true; do
 		shift=1
 		case $1 in
@@ -318,6 +349,7 @@ for Pass in 1 2; do
 
 		grep -zq . "$Mountlog" && {
 			log "$Mountlog" is not empty, indicating bad unmounting. Investigate and remove the file.
+			unset Mountlog
 			exit 1
 		}
 
@@ -328,24 +360,18 @@ for Pass in 1 2; do
 		placer 0 "$Tree/$Lower/" "" overlay true
 	}
 done
-rm "$argfile"
-unset argfile
+rm "$arglist"
+unset arglist
 
-[ "$overlay" ] && mount -o rbind -- "$Overlay" "$overlay"
+[ "$overlay" ] && printf %s\\0 "$Overlay" "$overlay" >>"$Bindlist"
 
+log entering new mount namespace...
 trap 'log INT recieved' INT # TODO: signal handling
-if [ $# -ge 1 ]; then
-	"$@"
-elif [ -t 1 ]; then
-	log entering shell...
-	"$SHELL"
-else
-	log provide a command.
-	exit 1
-fi
+unshare -m --propagation unchanged -- "$0" 2 "$Bindlist" "$@"
 echo
 log exiting...
 trap - INT
+
 
 dedupeFind(){
 	find "$Tree/$Upper" -mindepth 1 -depth "$@" -print0 |
