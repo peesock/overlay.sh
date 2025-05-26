@@ -193,6 +193,48 @@ placeOptsParse()(
 	echo "$opts" | grep -qF o && printf %s\\0 sink "$sink"
 )
 
+superUmount(){
+	mnt=$1
+	until err=$(umount -vr -- "$mnt" 2>&1) && printf %s\\n "$err"; do
+		pidlist=$(fuser -Mm "$mnt" 2>/dev/null) || {
+			mountpoint -q "$mnt" || break
+			# if there are no processes but point is still mounted, lazy umount
+			umount -l "$mnt"
+			log lazily unmounted "'$mnt'"
+			break
+		}
+		if [ "$pidlist" != "$prevlist" ]; then
+			echo "$err"
+			# ps -p "$(echo "$pidlist" | sed 's/\s\+/,/g; s/^,\+//')"
+			fuser -vmM "$mnt"
+			change=1
+		elif [ "$change" -eq 1 ]; then
+			log waiting...
+			change=0
+		fi
+		prevlist=$pidlist
+	
+		sleep 1
+	done
+}
+
+umounter(){
+	n=$(tr -cd '\0' <"$Mountlog" | wc -c) 2>/dev/null
+	for i in $(seq 1 "$n" | tac); do
+		line=$(sed -zn "$i"p <"$Mountlog"; echo x)
+		superUmount "${line%x}"
+	done
+
+	umount -vl "$Tree"
+}
+
+exiter(){
+	umounter
+	[ "$Mountlog" ] && rm "$Mountlog"
+	[ "$arglist" ] && rm "$arglist"
+	[ "$Bindlist" ] && rm "$Bindlist"
+}
+
 # for use in flag parsing
 pass(){
 	[ "$Pass" -eq "$1" ] && return 0
@@ -207,18 +249,13 @@ pass(){
 	return 1
 }
 
-exiter(){
-	[ "$Mountlog" ] && rm "$Mountlog"
-	[ "$arglist" ] && rm "$arglist"
-	[ "$Bindlist" ] && rm "$Bindlist"
-}
-
 # command running section
 [ "$1" = 2 ] && {
 	Bindlist=$2
 	binder(){
 		while [ $# -gt 1 ]; do
 			command mount -o bind -- "$1" "$2"
+			log bound "$1 --> $2"
 			shift 2
 		done
 	}
@@ -416,36 +453,3 @@ dedupeFind(){
 	}
 	rm "$tmp"
 }
-
-superUmount(){
-	mnt=$1
-	until err=$(umount -vr -- "$mnt" 2>&1) && printf %s\\n "$err"; do
-		pidlist=$(fuser -Mm "$mnt" 2>/dev/null) || {
-			mountpoint -q "$mnt" || break
-			# if there are no processes but point is still mounted, lazy umount
-			umount -l "$mnt"
-			log lazily unmounted "'$mnt'"
-			break
-		}
-		if [ "$pidlist" != "$prevlist" ]; then
-			echo "$err"
-			# ps -p "$(echo "$pidlist" | sed 's/\s\+/,/g; s/^,\+//')"
-			fuser -vmM "$mnt"
-			change=1
-		elif [ "$change" -eq 1 ]; then
-			log waiting...
-			change=0
-		fi
-		prevlist=$pidlist
-	
-		sleep 1
-	done
-}
-
-n=$(tr -cd '\0' <"$Mountlog" | wc -c) 2>/dev/null
-for i in $(seq 1 "$n" | tac); do
-	line=$(sed -zn "$i"p <"$Mountlog"; echo x)
-	superUmount "${line%x}"
-done
-
-umount -vl "$Tree"

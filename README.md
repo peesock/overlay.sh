@@ -304,8 +304,14 @@ your personal chroot experiment, it will copy everything inside /usr to achieve 
 
 Instead, either use bind mounts to rename things, or run overlay.sh with the -su flag as superuser.
 
-### Actual bug
+## Bugs
 
-As of util-linux 2.41, while rare, source dir paths cannot contain an odd number of double quotes.
+- As of util-linux 2.41, while rare, source dir paths cannot contain an odd number of double quotes.
+  They have an open issue for it that should be resolved in the next release.
 
-They have an open issue for it that should be resolved in the next release.
+- Recursive mounting is not yet implemented, meaning `-replace ./path` may reproduce ./path
+  successfully, but any mounts at ./path/tmpfs will be empty.
+
+- The Tree cannot currently be used if mounting over a path that contains the Tree. It will still
+  work outside of the command, but things like -overlay won't, since it is a piece of the Tree.
+  Recursive mounts should fix this once added.
