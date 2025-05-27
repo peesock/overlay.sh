@@ -219,9 +219,48 @@ read-only and read-write counterparts.
 
 ## Examples
 
+Run a suspicious command without changing $HOME:
+```
+    $ overlay.sh -r ~
+    $ ./not-malware.sh
+...
+i just deleted your nuts...
+    $ ls nuts
+    $ exit
+    $ ls nuts
+nuts
+```
+
+Make a read-only DwarFS mount read-write:
+```
+    $ dwarfs ./Rimworld.dwarfs ./rimworld
+    $ touch ./rimworld/nuts
+touch: cannot touch 'nuts': Function not implemented
+    $ overlay.sh -r ./rimworld
+    $ touch ./rimworld/nuts2
+    $ ls ./rimworld/nuts*
+nuts2
+```
+
+Use an isolated WINEPREFIX without copying any files:
+```
+    $ wineboot # ensure the prefix has all the latest files
+    $ overlay.sh -r ~/.wine -- wine ./rimworld/RimWorldWin64.exe
+```
+This way you won't have incompatible prefixes per-game depending on which outdated Microsoft Visual
+Thingus you had to install for another game, OR an extra 100-500MB more space taken per game. You
+only install what's needed.
+
+Games were and are my primary motivation for writing overlay.sh, ever since seeing JC141's (bad)
+bash scripts utilizing fuse-overlayfs and DwarFS. I also like to sandbox things, which overlay
+mounts tend to complement.
+
+My [dotfiles](https://github.com/peesock/dotfiles) have a WIP game.sh script to quickly use DwarFS
+and overlay.sh and wine and proton to run games as easily as possible, if you want inspiration.
+
 ## Strange behavior
 
-Due to complicated kernel permission and namespace and mounting rules, there are many unexpected
+Due to complicated kernel permissions and namespaces and mounting rules, there are many unexpected
 edge cases.
 
 ### Unprivileged submount viewing
