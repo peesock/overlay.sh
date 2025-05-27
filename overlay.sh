@@ -229,10 +229,12 @@ umounter(){
 }
 
 exiter(){
+	s=$?
 	umounter
 	[ "$Mountlog" ] && rm "$Mountlog"
 	[ "$arglist" ] && rm "$arglist"
 	[ "$Bindlist" ] && rm "$Bindlist"
+	exit $s
 }
 
 # for use in flag parsing
@@ -409,7 +411,6 @@ echo
 log exiting...
 trap - INT
 
-
 dedupeFind(){
 	find "$Tree/$Upper" -mindepth 1 -depth "$@" -print0 |
 		(printf %s\\0 "$Tree"; cut -zb "$(printf %s "$Tree/$Upper/" | wc -c)"-) |
@@ -419,12 +420,7 @@ dedupeFind(){
 				if (NR == 1) tree = $0;
 				else print tree "/" upper $0 ORS tree "/" lower $0
 			}
-		' | xargs -0 sh -c '
-			until [ $# -lt 2 ]; do
-				[ -e "$2" ] && printf %s\\0 "$1" "$2"
-				shift 2
-			done
-		' sh
+		'
 }
 
 [ "$dedupe" ] && {
@@ -443,10 +439,10 @@ dedupeFind(){
 			printf "delete these files? y/N: "
 			read -r line
 		} || line=y
-		case $line in y|Y)
+		case $line in [yY]*)
 			xargs -0 rm -- <"$tmp"
 			dedupeFind -type d | awk 'BEGIN{RS="\0"; ORS="\0";} {if (NR % 2 == 1) print $0;}' |
-			xargs -0 rmdir --ignore-fail-on-non-empty --
+				xargs -0 rmdir --ignore-fail-on-non-empty --
 			log removed duplicates
 			;;
 		esac
